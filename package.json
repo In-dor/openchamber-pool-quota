@@ -105,7 +105,7 @@
     }
   },
   "scripts": {
-    "build": "bun run scripts/build.ts",
+    "bundle": "bun run scripts/build.ts",
     "check": "bunx openchamber-guest-check",
     "typecheck": "tsc --noEmit"
   },

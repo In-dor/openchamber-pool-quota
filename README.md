@@ -72,7 +72,7 @@
 ```bash
 bun install
 bun run typecheck
-bun run build   # 构建 service/main.js 与 panel/main.js
+bun run bundle  # 构建 service/main.js 与 panel/main.js
 bun run check   # 运行 OpenChamber 官方扩展校验
 ```
 
