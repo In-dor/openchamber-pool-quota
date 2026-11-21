@@ -1,0 +1,117 @@
+{
+  "name": "openchamber-pool-quota",
+  "version": "1.0.0",
+  "description": "Dual-pool quota monitor for Antigravity & AIStudio2API Pool Status Board — works natively as both an OpenChamber extension (Usage card, Header dropdown, Work Status, Rail Panel, Mobile & Tray) and an OpenCode V2 Server + TUI plugin.",
+  "type": "module",
+  "license": "MIT",
+  "author": "In-dor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/In-dor/openchamber-pool-quota.git"
+  },
+  "homepage": "https://github.com/In-dor/openchamber-pool-quota#readme",
+  "keywords": [
+    "openchamber",
+    "openchamber-extension",
+    "opencode",
+    "opencode-v2",
+    "opencode-plugin",
+    "quota",
+    "antigravity",
+    "aistudio"
+  ],
+  "exports": {
+    ".": "./plugin/index.js",
+    "./tui": "./plugin/tui.tsx"
+  },
+  "files": [
+    "plugin/",
+    "panel/",
+    "service/",
+    "README.md",
+    "LICENSE"
+  ],
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.7.1"
+    },
+    "id": "pool-quota",
+    "name": "Pool Quota",
+    "icon": "dashboard-3",
+    "contributes": {
+      "panel": {
+        "entry": "panel/index.html",
+        "mobile": true
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "provides": [
+          "quota"
+        ]
+      },
+      "quota": {
+        "providers": []
+      },
+      "statusSection": {
+        "source": {
+          "path": "/status",
+          "interval": 15000
+        },
+        "title": "Pool Quota"
+      },
+      "opencodePlugin": "plugin",
+      "tools": [
+        {
+          "match": "pool_quota*",
+          "name": "Pool Quota",
+          "icon": "dashboard-3",
+          "output": "card",
+          "card": {
+            "label": "{output.pool_label}",
+            "title": "{output.summary}",
+            "status": {
+              "value": "{output.status_badge}",
+              "tones": {
+                "Healthy": "success",
+                "Warning": "warning",
+                "Critical": "error",
+                "Degraded": "warning",
+                "Offline": "error"
+              }
+            },
+            "fields": [
+              {
+                "label": "Antigravity 5h",
+                "value": "{output.ag_5h}"
+              },
+              {
+                "label": "Antigravity 7d",
+                "value": "{output.ag_weekly}"
+              },
+              {
+                "label": "AIStudio",
+                "value": "{output.ais_summary}"
+              },
+              {
+                "label": "Next Reset",
+                "value": "{output.next_reset}"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "check": "bunx openchamber-guest-check",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.7.3",
+    "@types/bun": "^1.4.2",
+    "typescript": "^5.9.2"
+  }
+}

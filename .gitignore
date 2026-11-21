@@ -1,0 +1,8 @@
+node_modules/
+bun.lock
+*.log
+*.tmp
+.DS_Store
+.env
+.env.*
+config.local.json
