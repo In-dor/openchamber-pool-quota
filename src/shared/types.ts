@@ -129,7 +129,6 @@ export interface AIStudioPool {
     unavailable: number;
   };
   playground: AIStudioChannelSummary;
-  build: AIStudioChannelSummary;
   models: AIStudioModelSummary[];
 }
 

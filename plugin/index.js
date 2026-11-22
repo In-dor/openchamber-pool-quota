@@ -321,7 +321,6 @@ function summarizeSnapshot(snap, cfg, options = {}) {
       reset_in: ais.next_reset_ms > 0 ? fmtCountdown(ais.next_reset_ms) : null,
       next_reset_ms: ais.next_reset_ms || null,
       playground_requests: ais.playground?.requests ?? 0,
-      build_requests: ais.build?.requests ?? 0,
       ...(includeModels
         ? {
           models: aisModels.map((m) => ({

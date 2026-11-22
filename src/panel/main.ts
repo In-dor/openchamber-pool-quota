@@ -629,8 +629,7 @@ const renderAisCard = (snapshot: BoardSnapshot): HTMLElement => {
 
   const meta = el('div', 'pq-win-sub');
   const pg = ais.playground;
-  const bd = ais.build;
-  meta.appendChild(el('span', 'pq-mono', `PG ${pg?.requests ?? 0}次 · Build ${bd?.requests ?? 0}次`));
+  meta.appendChild(el('span', 'pq-mono', `Playground ${pg?.requests ?? 0}次`));
   if (ais.next_reset_ms > 0) {
     meta.appendChild(el('span', 'pq-mono', `16:00 重置 · ${formatCountdown(ais.next_reset_ms)}`));
   }
