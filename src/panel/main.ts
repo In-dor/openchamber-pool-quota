@@ -9,6 +9,9 @@ import {
   mountSwitch,
   mountTabs,
   mountTextField,
+  type ButtonHandle,
+  type CheckboxHandle,
+  type TabsHandle,
 } from '@openchamber/sdk/ui';
 import {
   clampPercent,
@@ -17,223 +20,1134 @@ import {
   formatTokens,
   formatUsd,
   isBottleneckTokens,
-  toneForRemaining,
 } from '../shared/format.ts';
 import type {
+  AIStudioModelSummary,
+  AntigravityAccount,
+  AntigravityAccountHistory,
   AntigravityHistoryResponse,
+  AntigravityHistorySeries,
   AntigravityWindow,
   BoardSnapshot,
   PanelStateResponse,
 } from '../shared/types.ts';
 
-const WINDOW_ORDER = ['gemini_5h', 'gemini_weekly', 'claude_5h', 'claude_weekly'];
+type HealthLevel = 'full' | 'healthy' | 'moderate' | 'low' | 'empty';
+type HistoryWindowKind = '5h' | '7d';
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const WINDOW_ORDER = ['gemini_5h', 'gemini_weekly', 'claude_5h', 'claude_weekly', 'argon_weekly'];
+const SERIES_PAINT_ORDER = ['claude_weekly', 'claude_5h', 'argon_weekly', 'gemini_weekly', 'gemini_5h'];
+const SERIES_LEGEND_ORDER = ['gemini_5h', 'gemini_weekly', 'claude_5h', 'claude_weekly', 'argon_weekly'];
+const STORAGE_UI_PREFS_KEY = 'pq:panel-ui-prefs:v1';
+const AUTO_REFRESH_MS = 30_000;
+const HISTORY_FRESH_MS = 30_000;
+
+const RATE_COLOR_STOPS = [
+  { r: 239, g: 68, b: 68 },   // 0%
+  { r: 245, g: 158, b: 11 },  // 50%
+  { r: 16, g: 185, b: 129 },  // 100%
+];
+
+let svgGradSeq = 0;
+
+// ---------- Semantic Helpers ----------
+
+const healthLevelFor = (remainingPercent: number, exhaustedOverride = false): HealthLevel => {
+  const rem = clampPercent(remainingPercent);
+  if (exhaustedOverride || rem <= 0.05) return 'empty';
+  if (rem >= 99.95) return 'full';
+  if (rem > 60) return 'healthy';
+  if (rem >= 25) return 'moderate';
+  return 'low';
+};
+
+const isArgonKey = (key: string, group?: string): boolean => {
+  const k = key.toLowerCase();
+  const g = (group ?? '').toLowerCase();
+  return k === 'argon_weekly' || g === 'argon' || k.includes('argon');
+};
+
+const canShowArgonForTier = (tier: string): boolean => {
+  const normalized = String(tier || '').trim().toLowerCase();
+  // Ultra strictly hides Argon; only Pro accounts may show an independent Argon window.
+  return normalized === 'pro';
+};
+
+const filterAccountWindows = (acct: AntigravityAccount): AntigravityWindow[] => {
+  const allowArgon = canShowArgonForTier(acct.tier);
+  return (acct.windows ?? []).filter((w) => allowArgon || !isArgonKey(w.key, w.group));
+};
+
+const isActiveAgWindow = (win: AntigravityWindow): boolean => {
+  const rem = clampPercent(win.remaining_percent);
+  if (rem < 99.95) return true;
+  return Boolean(win.has_current_usage && (win.current_cost > 0 || win.current_tokens > 0 || win.current_requests > 0));
+};
+
+const isActiveAisModel = (model: AIStudioModelSummary): boolean => {
+  const rem = clampPercent(model.effective_percent);
+  if (rem < 99.95) return true;
+  if (model.eligible_accounts > 0 && model.available_accounts < model.eligible_accounts) return true;
+  return model.used_requests > 0 || model.used_tokens > 0;
+};
+
+const seriesColorVar = (key: string, group?: string): string => {
+  const k = key.toLowerCase();
+  const g = (group ?? '').toLowerCase();
+  if (k === 'gemini_5h') return 'var(--pq-series-gemini)';
+  if (k === 'gemini_weekly' || g === 'gemini') return 'var(--pq-series-gemini-2)';
+  if (k === 'claude_5h') return 'var(--pq-series-claude)';
+  if (k === 'claude_weekly' || g === 'claude') return 'var(--pq-series-claude-2)';
+  if (k.includes('argon') || g === 'argon') return 'var(--pq-series-argon)';
+  return 'var(--pq-full)';
+};
+
+const shortSeriesLabel = (series: AntigravityHistorySeries): string => {
+  switch (series.key) {
+    case 'gemini_5h': return 'Gemini 5h';
+    case 'gemini_weekly': return 'Gemini 周';
+    case 'claude_5h': return 'Claude 5h';
+    case 'claude_weekly': return 'Claude 周';
+    case 'argon_weekly': return 'Argon 周';
+    default: return series.label || series.key;
+  }
+};
+
+const tierClass = (tier: string): string => {
+  const t = String(tier || '').trim().toLowerCase();
+  if (t === 'ultra') return 'pq-tier-ultra';
+  if (t === 'pro') return 'pq-tier-pro';
+  return 'pq-tier-free';
+};
+
+const accountStatusClass = (status: string): string => {
+  switch (String(status || '').toLowerCase()) {
+    case 'available':
+    case 'ready':
+      return 'pq-st-ok';
+    case 'limited':
+    case 'cooldown':
+      return 'pq-st-warn';
+    case 'exhausted':
+    case 'unavailable':
+    case 'auth_required':
+      return 'pq-st-err';
+    default:
+      return 'pq-st-muted';
+  }
+};
+
+const rateToRgb = (rate: number): string => {
+  const t = Math.max(0, Math.min(1, rate));
+  const seg = t < 0.5 ? 0 : 1;
+  const localT = seg === 0 ? t * 2 : (t - 0.5) * 2;
+  const from = RATE_COLOR_STOPS[seg]!;
+  const to = RATE_COLOR_STOPS[seg + 1]!;
+  const r = Math.round(from.r + (to.r - from.r) * localT);
+  const g = Math.round(from.g + (to.g - from.g) * localT);
+  const b = Math.round(from.b + (to.b - from.b) * localT);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
+const toMs = (ts: number): number => (ts > 1e12 ? ts : ts * 1000);
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+const formatAxisTime = (ms: number, mode: 'hm' | 'md'): string => {
+  const d = new Date(ms);
+  if (mode === 'md') return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
+const formatScrubTime = (ms: number): string => {
+  const d = new Date(ms);
+  return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
+const urlHostLabel = (rawUrl: string): string => {
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.host;
+  } catch {
+    return rawUrl;
+  }
+};
+
+// ---------- Styles ----------
 
 const injectStyles = (): void => {
   if (document.getElementById('pq-styles')) return;
   const style = document.createElement('style');
   style.id = 'pq-styles';
   style.textContent = `
-    * { box-sizing: border-box; }
+    :root {
+      --pq-bg: var(--oc-bg, var(--surface-background, transparent));
+      --pq-surface: var(--oc-elevated, var(--surface-elevated, rgba(127, 127, 127, 0.05)));
+      --pq-surface-2: var(--oc-muted-surface, var(--surface-muted, rgba(127, 127, 127, 0.08)));
+      --pq-fg: var(--oc-fg, var(--surface-foreground, #0f172a));
+      --pq-muted: var(--oc-muted, var(--surface-muted-foreground, #64748b));
+      --pq-border: var(--oc-border, var(--interactive-border, rgba(127, 127, 127, 0.22)));
+      --pq-hover: var(--oc-hover, var(--interactive-hover, rgba(127, 127, 127, 0.1)));
+      --pq-primary: var(--oc-primary, var(--primary, #0284c7));
+      --pq-radius: var(--oc-radius, var(--radius, 10px));
+
+      /* 5-level health palette (Light theme) */
+      --pq-full: #0284c7;
+      --pq-full-bar: #0ea5e9;
+      --pq-full-bg: rgba(2, 132, 199, 0.11);
+
+      --pq-healthy: #059669;
+      --pq-healthy-bar: #10b981;
+      --pq-healthy-bg: rgba(5, 150, 105, 0.11);
+
+      --pq-moderate: #d97706;
+      --pq-moderate-bar: #f59e0b;
+      --pq-moderate-bg: rgba(217, 119, 6, 0.13);
+
+      --pq-low: #dc2626;
+      --pq-low-bar: #ef4444;
+      --pq-low-bg: rgba(220, 38, 38, 0.12);
+
+      --pq-empty: #991b1b;
+      --pq-empty-bar: #991b1b;
+      --pq-empty-bg: rgba(153, 27, 27, 0.16);
+      --pq-empty-track: repeating-linear-gradient(
+        -45deg,
+        rgba(153, 27, 27, 0.18),
+        rgba(153, 27, 27, 0.18) 4px,
+        rgba(153, 27, 27, 0.06) 4px,
+        rgba(153, 27, 27, 0.06) 8px
+      );
+
+      /* Tier badges (Light): Ultra 金紫, Pro 蓝, Free 灰 */
+      --pq-tier-ultra-bg: linear-gradient(135deg, rgba(139, 92, 246, 0.16), rgba(217, 119, 6, 0.17));
+      --pq-tier-ultra-fg: #6d28d9;
+      --pq-tier-ultra-bd: rgba(139, 92, 246, 0.34);
+
+      --pq-tier-pro-bg: rgba(37, 99, 235, 0.11);
+      --pq-tier-pro-fg: #1d4ed8;
+      --pq-tier-pro-bd: rgba(37, 99, 235, 0.25);
+
+      --pq-tier-free-bg: rgba(100, 116, 139, 0.12);
+      --pq-tier-free-fg: #475569;
+      --pq-tier-free-bd: rgba(100, 116, 139, 0.22);
+
+      /* Model family chart palette (Light) */
+      --pq-series-gemini: #0284c7;
+      --pq-series-gemini-2: #06b6d4;
+      --pq-series-claude: #9333ea;
+      --pq-series-claude-2: #ec4899;
+      --pq-series-argon: #d97706;
+    }
+
+    :root[data-oc-theme="dark"] {
+      --pq-fg: var(--oc-fg, var(--surface-foreground, #f1f5f9));
+      --pq-muted: var(--oc-muted, var(--surface-muted-foreground, #94a3b8));
+
+      /* 5-level health palette (Dark theme) */
+      --pq-full: #38bdf8;
+      --pq-full-bar: #38bdf8;
+      --pq-full-bg: rgba(56, 189, 248, 0.16);
+
+      --pq-healthy: #34d399;
+      --pq-healthy-bar: #34d399;
+      --pq-healthy-bg: rgba(52, 211, 153, 0.15);
+
+      --pq-moderate: #fbbf24;
+      --pq-moderate-bar: #fbbf24;
+      --pq-moderate-bg: rgba(251, 191, 36, 0.16);
+
+      --pq-low: #f87171;
+      --pq-low-bar: #f87171;
+      --pq-low-bg: rgba(248, 113, 113, 0.17);
+
+      --pq-empty: #fda4af;
+      --pq-empty-bar: #dc2626;
+      --pq-empty-bg: rgba(220, 38, 38, 0.28);
+      --pq-empty-track: repeating-linear-gradient(
+        -45deg,
+        rgba(220, 38, 38, 0.34),
+        rgba(220, 38, 38, 0.34) 4px,
+        rgba(220, 38, 38, 0.12) 4px,
+        rgba(220, 38, 38, 0.12) 8px
+      );
+
+      /* Tier badges (Dark): Ultra 金紫, Pro 蓝, Free 灰 */
+      --pq-tier-ultra-bg: linear-gradient(135deg, rgba(167, 139, 250, 0.24), rgba(251, 191, 36, 0.2));
+      --pq-tier-ultra-fg: #f3e8ff;
+      --pq-tier-ultra-bd: rgba(216, 180, 254, 0.36);
+
+      --pq-tier-pro-bg: rgba(59, 130, 246, 0.2);
+      --pq-tier-pro-fg: #93c5fd;
+      --pq-tier-pro-bd: rgba(96, 165, 250, 0.34);
+
+      --pq-tier-free-bg: rgba(148, 163, 184, 0.16);
+      --pq-tier-free-fg: #cbd5e1;
+      --pq-tier-free-bd: rgba(148, 163, 184, 0.24);
+
+      /* Model family chart palette (Dark) */
+      --pq-series-gemini: #38bdf8;
+      --pq-series-gemini-2: #22d3ee;
+      --pq-series-claude: #c084fc;
+      --pq-series-claude-2: #f472b6;
+      --pq-series-argon: #fbbf24;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-oc-theme="light"]) {
+        --pq-full: #38bdf8;
+        --pq-full-bar: #38bdf8;
+        --pq-full-bg: rgba(56, 189, 248, 0.16);
+        --pq-healthy: #34d399;
+        --pq-healthy-bar: #34d399;
+        --pq-healthy-bg: rgba(52, 211, 153, 0.15);
+        --pq-moderate: #fbbf24;
+        --pq-moderate-bar: #fbbf24;
+        --pq-moderate-bg: rgba(251, 191, 36, 0.16);
+        --pq-low: #f87171;
+        --pq-low-bar: #f87171;
+        --pq-low-bg: rgba(248, 113, 113, 0.17);
+        --pq-empty: #fda4af;
+        --pq-empty-bar: #dc2626;
+        --pq-empty-bg: rgba(220, 38, 38, 0.28);
+        --pq-series-gemini: #38bdf8;
+        --pq-series-gemini-2: #22d3ee;
+        --pq-series-claude: #c084fc;
+        --pq-series-claude-2: #f472b6;
+        --pq-series-argon: #fbbf24;
+      }
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
     html, body {
       margin: 0;
       padding: 0;
+      width: 100%;
+      overflow-x: hidden;
       background: transparent;
-      color: var(--foreground, #e5e7eb);
-      font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+      color: var(--pq-fg);
+      font-family: var(--oc-font, var(--font-sans, system-ui, -apple-system, sans-serif));
       font-size: var(--oc-font-size, 13px);
       line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
     }
+
     .pq-wrap {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      padding: 12px;
+      padding: 10px 10px 16px;
+      width: 100%;
       max-width: 100%;
+      min-width: 0;
     }
+
+    .pq-num {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pq-mono {
+      font-family: var(--oc-mono, var(--font-mono, ui-monospace, SFMono-Regular, monospace));
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pq-muted {
+      color: var(--pq-muted);
+      font-size: 0.84em;
+    }
+
+    /* Compact Header */
     .pq-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .pq-title-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-    .pq-title {
-      font-size: 1.05em;
-      font-weight: 600;
-      margin: 0;
-      white-space: nowrap;
-    }
-    .pq-actions {
-      display: flex;
-      align-items: center;
       gap: 6px;
       flex-wrap: wrap;
+      min-width: 0;
+      padding: 2px 1px;
     }
-    .pq-card {
-      background: var(--card, rgba(127, 127, 127, 0.08));
-      border: 1px solid var(--border, rgba(127, 127, 127, 0.22));
-      border-radius: var(--radius, 8px);
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .pq-card-head {
+
+    .pq-brand {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 7px;
+      min-width: 0;
+      flex: 1 1 auto;
     }
-    .pq-card-title {
-      font-weight: 600;
-      font-size: 0.95em;
+
+    .pq-title {
+      font-size: 1.02em;
+      font-weight: 700;
+      letter-spacing: -0.01em;
       margin: 0;
-    }
-    .pq-muted {
-      color: var(--muted-foreground, rgba(160, 160, 170, 0.9));
-      font-size: 0.85em;
-    }
-    .pq-mono {
-      font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
-      font-variant-numeric: tabular-nums;
-    }
-    .pq-win-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .pq-win {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .pq-win-top {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .pq-win-name {
-      font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .pq-win-val {
-      font-family: var(--font-mono, ui-monospace, monospace);
-      font-variant-numeric: tabular-nums;
-      font-size: 0.9em;
+
+    .pq-pool-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+
+    .pq-dot-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 0.72em;
+      font-weight: 600;
+      border: 1px solid var(--pq-border);
+      background: var(--pq-surface);
+      color: var(--pq-muted);
       white-space: nowrap;
     }
+
+    .pq-dot-chip .pq-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+
+    .pq-dot-chip.is-ok { color: var(--pq-healthy); border-color: color-mix(in srgb, var(--pq-healthy) 30%, transparent); background: var(--pq-healthy-bg); }
+    .pq-dot-chip.is-warn { color: var(--pq-moderate); border-color: color-mix(in srgb, var(--pq-moderate) 32%, transparent); background: var(--pq-moderate-bg); }
+    .pq-dot-chip.is-err { color: var(--pq-low); border-color: color-mix(in srgb, var(--pq-low) 32%, transparent); background: var(--pq-low-bg); }
+
+    .pq-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+
+    .pq-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 24px;
+      padding: 0;
+      border-radius: calc(var(--pq-radius) - 3px);
+      border: 1px solid var(--pq-border);
+      background: transparent;
+      color: var(--pq-muted);
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .pq-icon-btn:hover {
+      background: var(--pq-hover);
+      color: var(--pq-fg);
+    }
+
+    .pq-icon-btn[aria-expanded="true"] {
+      color: var(--pq-full);
+      border-color: color-mix(in srgb, var(--pq-full) 40%, var(--pq-border));
+      background: var(--pq-full-bg);
+    }
+
+    /* Cards */
+    .pq-card {
+      background: var(--pq-surface);
+      border: 1px solid var(--pq-border);
+      border-radius: var(--pq-radius);
+      padding: 11px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      min-width: 0;
+      transition: border-color 0.18s ease;
+    }
+
+    .pq-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .pq-card-head-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .pq-card-title {
+      font-weight: 700;
+      font-size: 0.94em;
+      letter-spacing: -0.01em;
+      margin: 0;
+      white-space: nowrap;
+    }
+
+    /* Badges & Pills */
+    .pq-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 0.72em;
+      font-weight: 600;
+      line-height: 1.45;
+      white-space: nowrap;
+      border: 1px solid transparent;
+      flex-shrink: 0;
+    }
+
+    .pq-tier-ultra {
+      background: var(--pq-tier-ultra-bg);
+      color: var(--pq-tier-ultra-fg);
+      border-color: var(--pq-tier-ultra-bd);
+    }
+
+    .pq-tier-pro {
+      background: var(--pq-tier-pro-bg);
+      color: var(--pq-tier-pro-fg);
+      border-color: var(--pq-tier-pro-bd);
+    }
+
+    .pq-tier-free {
+      background: var(--pq-tier-free-bg);
+      color: var(--pq-tier-free-fg);
+      border-color: var(--pq-tier-free-bd);
+    }
+
+    .pq-st-ok { background: var(--pq-healthy-bg); color: var(--pq-healthy); }
+    .pq-st-warn { background: var(--pq-moderate-bg); color: var(--pq-moderate); }
+    .pq-st-err { background: var(--pq-low-bg); color: var(--pq-low); }
+    .pq-st-muted { background: var(--pq-surface-2); color: var(--pq-muted); }
+
+    .pq-bottleneck-tok {
+      background: var(--pq-moderate-bg);
+      color: var(--pq-moderate);
+      border-color: color-mix(in srgb, var(--pq-moderate) 28%, transparent);
+    }
+
+    .pq-bottleneck-req {
+      background: var(--pq-full-bg);
+      color: var(--pq-full);
+      border-color: color-mix(in srgb, var(--pq-full) 28%, transparent);
+    }
+
+    .pq-pill-empty {
+      background: var(--pq-empty-bg);
+      color: var(--pq-empty);
+      border-color: color-mix(in srgb, var(--pq-empty-bar) 40%, transparent);
+    }
+
+    /* 5-Level Health Colors */
+    .pq-lv-full { color: var(--pq-full); }
+    .pq-lv-healthy { color: var(--pq-healthy); }
+    .pq-lv-moderate { color: var(--pq-moderate); }
+    .pq-lv-low { color: var(--pq-low); }
+    .pq-lv-empty { color: var(--pq-empty); font-weight: 700; }
+
     .pq-bar-track {
       width: 100%;
       height: 6px;
       border-radius: 999px;
-      background: var(--muted, rgba(127, 127, 127, 0.2));
+      background: var(--pq-surface-2);
       overflow: hidden;
+      position: relative;
     }
+
+    .pq-bar-track.is-thin { height: 3.5px; }
+    .pq-bar-track.is-empty { background: var(--pq-empty-track); }
+
     .pq-bar-fill {
       height: 100%;
       border-radius: 999px;
-      transition: width 0.2s ease;
+      transition: width 0.25s ease;
     }
-    .pq-tone-success { background: var(--success, #22c55e); }
-    .pq-tone-warning { background: var(--warning, #f59e0b); }
-    .pq-tone-error { background: var(--destructive, #ef4444); }
-    .pq-text-success { color: var(--success-text, var(--success, #22c55e)); }
-    .pq-text-warning { color: var(--warning-text, var(--warning, #f59e0b)); }
-    .pq-text-error { color: var(--error-text, var(--destructive, #ef4444)); }
+
+    .pq-bar-full { background: var(--pq-full-bar); }
+    .pq-bar-healthy { background: var(--pq-healthy-bar); }
+    .pq-bar-moderate { background: var(--pq-moderate-bar); }
+    .pq-bar-low { background: var(--pq-low-bar); }
+    .pq-bar-empty { background: var(--pq-empty-bar); }
+
+    /* Antigravity Account Blocks */
+    .pq-acct-list {
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+      min-width: 0;
+    }
+
+    .pq-acct-block {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .pq-acct-block + .pq-acct-block {
+      padding-top: 11px;
+      border-top: 1px solid var(--pq-border);
+    }
+
+    .pq-acct-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .pq-acct-id {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .pq-acct-name {
+      font-weight: 700;
+      font-size: 0.9em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    /* Recent 200m Micro-Capsule Bar */
+    .pq-recent-strip {
+      background: var(--pq-surface-2);
+      border: 1px solid color-mix(in srgb, var(--pq-border) 75%, transparent);
+      border-radius: calc(var(--pq-radius) - 3px);
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .pq-recent-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 0.76em;
+      min-width: 0;
+    }
+
+    .pq-recent-label {
+      color: var(--pq-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .pq-recent-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .pq-recent-ok { color: var(--pq-healthy); font-weight: 600; }
+    .pq-recent-fail { color: var(--pq-low); font-weight: 600; }
+
+    .pq-rate-capsule {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 6px;
+      height: 17px;
+      border-radius: 999px;
+      font-size: 0.92em;
+      font-weight: 700;
+      background: color-mix(in srgb, var(--pq-border) 55%, transparent);
+      color: var(--pq-muted);
+      white-space: nowrap;
+    }
+
+    .pq-rate-capsule.is-high { background: var(--pq-healthy-bg); color: var(--pq-healthy); }
+    .pq-rate-capsule.is-med { background: var(--pq-moderate-bg); color: var(--pq-moderate); }
+    .pq-rate-capsule.is-low { background: var(--pq-low-bg); color: var(--pq-low); }
+
+    .pq-buckets {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      width: 100%;
+      min-width: 0;
+      height: 10px;
+    }
+
+    .pq-bucket {
+      flex: 1 1 0;
+      min-width: 2px;
+      height: 5px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--pq-border) 70%, transparent);
+      opacity: 0.55;
+      cursor: pointer;
+      transition: transform 0.12s ease, opacity 0.12s ease;
+    }
+
+    .pq-bucket.is-active { opacity: 0.92; }
+    .pq-bucket:hover,
+    .pq-bucket.is-focus {
+      transform: scaleY(1.75);
+      opacity: 1;
+    }
+
+    /* Active Quota Windows */
+    .pq-win-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .pq-win-active {
+      background: var(--pq-surface-2);
+      border: 1px solid color-mix(in srgb, var(--pq-border) 75%, transparent);
+      border-radius: calc(var(--pq-radius) - 3px);
+      padding: 8px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+      transition: border-color 0.15s ease;
+    }
+
+    .pq-win-active.is-empty {
+      border-color: color-mix(in srgb, var(--pq-empty-bar) 45%, var(--pq-border));
+    }
+
+    .pq-win-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .pq-win-name-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .pq-fam-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .pq-win-name {
+      font-weight: 600;
+      font-size: 0.89em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .pq-win-val-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+
+    .pq-win-val {
+      font-family: var(--oc-mono, var(--font-mono, ui-monospace, monospace));
+      font-variant-numeric: tabular-nums;
+      font-size: 0.9em;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
     .pq-win-sub {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      font-size: 0.8em;
-      color: var(--muted-foreground, rgba(160, 160, 170, 0.9));
+      gap: 4px 8px;
+      font-size: 0.77em;
+      color: var(--pq-muted);
       flex-wrap: wrap;
+      min-width: 0;
     }
+
+    .pq-win-usage {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .pq-win-reset {
+      white-space: nowrap;
+      margin-left: auto;
+    }
+
+    /* Compact Idle 100% Windows */
+    .pq-win-idle-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .pq-win-idle-grid.is-single {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pq-win-idle-tile {
+      background: color-mix(in srgb, var(--pq-full-bg) 48%, var(--pq-surface-2));
+      border: 1px solid color-mix(in srgb, var(--pq-full) 20%, var(--pq-border));
+      border-radius: calc(var(--pq-radius) - 3px);
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .pq-win-idle-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .pq-win-idle-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.8em;
+      font-weight: 600;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .pq-win-idle-name span:last-child {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .pq-win-idle-pct {
+      font-size: 0.8em;
+      font-weight: 700;
+      color: var(--pq-full);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .pq-win-idle-sub {
+      font-size: 0.72em;
+      color: var(--pq-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Trend Chart */
     .pq-chart-box {
-      border-top: 1px solid var(--border, rgba(127, 127, 127, 0.16));
+      border-top: 1px solid color-mix(in srgb, var(--pq-border) 70%, transparent);
       padding-top: 8px;
       display: flex;
       flex-direction: column;
       gap: 6px;
+      min-width: 0;
     }
+
     .pq-chart-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
     }
-    .pq-chart-svg {
-      width: 100%;
-      height: 84px;
-      display: block;
+
+    .pq-chart-title {
+      font-size: 0.8em;
+      font-weight: 600;
+      color: var(--pq-muted);
+      white-space: nowrap;
     }
-    .pq-legend {
+
+    .pq-chart-tabs .oc-sdk-tabs {
+      padding: 1px;
+    }
+
+    .pq-chart-tabs .oc-sdk-tab {
+      height: 22px;
+      padding: 0 8px;
+      font-size: 0.76em;
+    }
+
+    .pq-chart-body {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-height: 132px;
+      min-width: 0;
+    }
+
+    .pq-chart-loading,
+    .pq-chart-empty {
+      min-height: 126px;
       display: flex;
       align-items: center;
-      gap: 10px;
+      justify-content: center;
+      gap: 6px;
+      border-radius: calc(var(--pq-radius) - 3px);
+      background: var(--pq-surface-2);
+      border: 1px dashed color-mix(in srgb, var(--pq-border) 80%, transparent);
+      color: var(--pq-muted);
       font-size: 0.8em;
-      color: var(--muted-foreground, rgba(160, 160, 170, 0.9));
+      padding: 10px;
+      text-align: center;
+    }
+
+    .pq-chart-readout {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px 8px;
       flex-wrap: wrap;
+      min-height: 24px;
+      padding: 3px 7px;
+      border-radius: calc(var(--pq-radius) - 4px);
+      background: var(--pq-surface-2);
+      border: 1px solid color-mix(in srgb, var(--pq-border) 70%, transparent);
+      font-size: 0.75em;
+      transition: border-color 0.14s ease, background-color 0.14s ease;
     }
-    .pq-legend-dot {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 4px;
-      vertical-align: middle;
+
+    .pq-chart-readout.is-scrubbing {
+      border-color: color-mix(in srgb, var(--pq-full) 55%, var(--pq-border));
+      background: color-mix(in srgb, var(--pq-full-bg) 55%, var(--pq-surface-2));
     }
+
+    .pq-readout-items {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      min-width: 0;
+    }
+
+    .pq-readout-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+
+    .pq-readout-time {
+      font-weight: 700;
+      color: var(--pq-fg);
+      white-space: nowrap;
+    }
+
+    .pq-readout-hint {
+      color: var(--pq-muted);
+      font-size: 0.92em;
+      margin-left: auto;
+      white-space: nowrap;
+    }
+
+    .pq-readout-clear {
+      border: 1px solid var(--pq-border);
+      background: var(--pq-surface);
+      color: var(--pq-muted);
+      border-radius: 999px;
+      padding: 0 6px;
+      height: 17px;
+      font-size: 0.9em;
+      line-height: 1;
+      cursor: pointer;
+      margin-left: auto;
+    }
+
+    .pq-chart-svg-wrap {
+      width: 100%;
+      min-width: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .pq-chart-svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      overflow: visible;
+      touch-action: pan-y;
+    }
+
+    .pq-svg-axis {
+      fill: var(--pq-muted);
+      font-family: var(--oc-mono, var(--font-mono, ui-monospace, monospace));
+      font-size: 9px;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+
+    /* AIStudio Model List & Full-Health Fold Group */
+    .pq-ais-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+      font-size: 0.78em;
+      color: var(--pq-muted);
+    }
+
     .pq-model-list {
       display: flex;
       flex-direction: column;
-      gap: 7px;
+      gap: 6px;
+      min-width: 0;
     }
+
     .pq-model-row {
       display: flex;
       flex-direction: column;
-      gap: 3px;
-      padding: 6px 8px;
-      border-radius: 6px;
-      background: var(--muted, rgba(127, 127, 127, 0.08));
+      gap: 4px;
+      padding: 7px 9px;
+      border-radius: calc(var(--pq-radius) - 3px);
+      background: var(--pq-surface-2);
+      border: 1px solid color-mix(in srgb, var(--pq-border) 72%, transparent);
+      min-width: 0;
+      transition: border-color 0.15s ease;
     }
+
+    .pq-model-row.is-empty {
+      border-color: color-mix(in srgb, var(--pq-empty-bar) 45%, var(--pq-border));
+    }
+
+    .pq-model-row.is-full-compact {
+      padding: 6px 8px;
+      gap: 3px;
+      background: color-mix(in srgb, var(--pq-full-bg) 36%, var(--pq-surface-2));
+      border-color: color-mix(in srgb, var(--pq-full) 18%, var(--pq-border));
+    }
+
     .pq-model-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 6px;
+      min-width: 0;
     }
+
     .pq-model-name {
-      font-weight: 500;
-      font-size: 0.9em;
+      font-weight: 600;
+      font-size: 0.88em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .pq-model-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+
+    .pq-full-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .pq-full-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: calc(var(--pq-radius) - 3px);
+      border: 1px dashed color-mix(in srgb, var(--pq-full) 38%, var(--pq-border));
+      background: color-mix(in srgb, var(--pq-full-bg) 42%, transparent);
+      color: var(--pq-fg);
+      font: inherit;
+      font-size: 0.81em;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: left;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .pq-full-toggle:hover {
+      background: color-mix(in srgb, var(--pq-full-bg) 72%, transparent);
+      border-color: color-mix(in srgb, var(--pq-full) 55%, var(--pq-border));
+    }
+
+    .pq-full-toggle-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .pq-full-toggle-text {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .pq-pill {
-      display: inline-flex;
-      align-items: center;
-      padding: 1px 6px;
-      border-radius: 999px;
-      font-size: 0.75em;
-      background: var(--border, rgba(127, 127, 127, 0.2));
-      color: var(--muted-foreground, inherit);
-      white-space: nowrap;
+
+    .pq-chevron {
+      display: inline-block;
+      font-size: 0.88em;
+      color: var(--pq-muted);
+      transition: transform 0.16s ease;
+      flex-shrink: 0;
     }
+
+    .pq-chevron.is-open {
+      transform: rotate(180deg);
+    }
+
+    .pq-full-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .pq-full-list[hidden] {
+      display: none;
+    }
+
+    /* Bottom Collapsible Settings Card */
     .pq-settings-toggle {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
       cursor: pointer;
       user-select: none;
       background: transparent;
@@ -244,26 +1158,72 @@ const injectStyles = (): void => {
       font: inherit;
       text-align: left;
     }
+
+    .pq-settings-summary {
+      font-size: 0.77em;
+      color: var(--pq-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .pq-settings-body {
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      padding-top: 6px;
-      border-top: 1px solid var(--border, rgba(127, 127, 127, 0.16));
+      gap: 10px;
+      padding-top: 9px;
+      border-top: 1px solid var(--pq-border);
+      min-width: 0;
     }
+
+    .pq-settings-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .pq-settings-group + .pq-settings-group {
+      padding-top: 9px;
+      border-top: 1px solid color-mix(in srgb, var(--pq-border) 65%, transparent);
+    }
+
+    .pq-settings-section-label {
+      font-size: 0.76em;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--pq-muted);
+      text-transform: uppercase;
+    }
+
     .pq-settings-actions {
       display: flex;
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
     }
+
     .pq-footer-note {
-      font-size: 0.78em;
-      color: var(--muted-foreground, rgba(160, 160, 170, 0.85));
+      font-size: 0.75em;
+      color: var(--pq-muted);
+      padding: 0 2px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    @media (max-width: 260px) {
+      .pq-win-idle-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
     }
   `;
   document.head.appendChild(style);
 };
+
+// ---------- DOM & SVG Helpers ----------
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -276,96 +1236,37 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   return node;
 };
 
-const buildHistorySvg = (history: AntigravityHistoryResponse): HTMLElement => {
-  const container = el('div');
-  const validSeries = (history.series ?? []).filter((s) => Array.isArray(s.points) && s.points.length >= 2);
-  if (validSeries.length === 0) {
-    container.appendChild(el('div', 'pq-muted', '暂无历史采样曲线'));
-    return container;
+const svgEl = <K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  attrs: Record<string, string | number> = {},
+): SVGElementTagNameMap[K] => {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    node.setAttribute(k, String(v));
   }
-
-  const W = 320;
-  const H = 84;
-  const PAD_X = 6;
-  const PAD_Y = 8;
-  const innerW = W - PAD_X * 2;
-  const innerH = H - PAD_Y * 2;
-
-  let minT = Number.POSITIVE_INFINITY;
-  let maxT = Number.NEGATIVE_INFINITY;
-  for (const s of validSeries) {
-    for (const pt of s.points) {
-      if (pt[0] < minT) minT = pt[0];
-      if (pt[0] > maxT) maxT = pt[0];
-    }
-  }
-  const spanT = Math.max(1, maxT - minT);
-
-  const colors: Record<string, string> = {
-    gemini_5h: 'var(--primary, #3b82f6)',
-    gemini_weekly: 'var(--primary, #3b82f6)',
-    claude_5h: 'var(--success, #22c55e)',
-    claude_weekly: 'var(--success, #22c55e)',
-  };
-
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('class', 'pq-chart-svg');
-
-  // Subtle horizontal guide lines at 100%, 50%, 20%
-  for (const pct of [100, 50, 20]) {
-    const y = PAD_Y + innerH * (1 - pct / 100);
-    const line = document.createElementNS(svgNS, 'line');
-    line.setAttribute('x1', String(PAD_X));
-    line.setAttribute('x2', String(W - PAD_X));
-    line.setAttribute('y1', y.toFixed(1));
-    line.setAttribute('y2', y.toFixed(1));
-    line.setAttribute('stroke', pct === 20 ? 'var(--destructive, #ef4444)' : 'var(--border, rgba(127,127,127,0.3))');
-    line.setAttribute('stroke-opacity', pct === 20 ? '0.4' : '0.6');
-    line.setAttribute('stroke-dasharray', '3 3');
-    line.setAttribute('stroke-width', '1');
-    svg.appendChild(line);
-  }
-
-  for (const s of validSeries) {
-    const stroke = colors[s.key] ?? 'var(--info, #06b6d4)';
-    // Break path when remaining jumps sharply upward (window reset)
-    let d = '';
-    let prevR: number | null = null;
-    for (let i = 0; i < s.points.length; i += 1) {
-      const [t, rRaw] = s.points[i]!;
-      const r = clampPercent(rRaw);
-      const x = PAD_X + ((t - minT) / spanT) * innerW;
-      const y = PAD_Y + innerH * (1 - r / 100);
-      const isJump = prevR !== null && r - prevR > 12;
-      d += `${i === 0 || isJump ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)} `;
-      prevR = r;
-    }
-    const pathEl = document.createElementNS(svgNS, 'path');
-    pathEl.setAttribute('d', d.trim());
-    pathEl.setAttribute('fill', 'none');
-    pathEl.setAttribute('stroke', stroke);
-    pathEl.setAttribute('stroke-width', '2');
-    pathEl.setAttribute('stroke-linecap', 'round');
-    pathEl.setAttribute('stroke-linejoin', 'round');
-    svg.appendChild(pathEl);
-  }
-
-  container.appendChild(svg);
-
-  const legend = el('div', 'pq-legend');
-  for (const s of validSeries) {
-    const item = el('span');
-    const dot = el('span', 'pq-legend-dot');
-    dot.style.background = colors[s.key] ?? 'var(--info, #06b6d4)';
-    item.appendChild(dot);
-    item.appendChild(document.createTextNode(`${s.label} ${formatPercent(s.remaining)}`));
-    legend.appendChild(item);
-  }
-  container.appendChild(legend);
-  return container;
+  return node;
 };
+
+const createGearIcon = (): SVGSVGElement => {
+  const svg = svgEl('svg', {
+    width: 14,
+    height: 14,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': 2,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+    'aria-hidden': 'true',
+  });
+  svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 3 }));
+  svg.appendChild(svgEl('path', {
+    d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z',
+  }));
+  return svg;
+};
+
+// ---------- Host & State ----------
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root')!;
@@ -373,30 +1274,134 @@ const root = document.querySelector<HTMLElement>('#root')!;
 let mounted = false;
 let loading = false;
 let saving = false;
+let savingShowAis = false;
+let savingCompact = false;
 let currentState: PanelStateResponse | null = null;
-let historyWindow: '5h' | '7d' = '5h';
 let settingsExpanded = false;
+let aisFullExpanded = false;
 let draftUrl = 'http://127.0.0.1:18380';
 let draftPasscode = '';
 let draftDirty = false;
 let settingsFeedback: { tone: 'success' | 'error' | 'info'; text: string } | null = null;
-let activeDisposers: Array<() => void> = [];
+let activeScrubCount = 0;
 
-const disposeUi = (): void => {
-  for (const fn of activeDisposers) {
+const accountHistoryWindow = new Map<string, HistoryWindowKind>();
+const historyCache = new Map<string, { data: AntigravityHistoryResponse; fetchedAtMs: number }>();
+const historyInFlight = new Set<string>();
+const chartBodyClearer = new WeakMap<HTMLElement, () => void>();
+
+let activeDisposers: Array<() => void> = [];
+let settingsDisposers: Array<() => void> = [];
+let activeChartClearers = new Set<() => void>();
+let refreshBtnHandle: ButtonHandle | null = null;
+let gearBtnEl: HTMLButtonElement | null = null;
+let settingsCardEl: HTMLElement | null = null;
+let showAisSwitchHandle: CheckboxHandle | null = null;
+let compactSwitchHandle: CheckboxHandle | null = null;
+let autoRefreshTimer: number | null = null;
+
+const getAccountWindow = (accountId: string): HistoryWindowKind => (
+  accountHistoryWindow.get(accountId) ?? '5h'
+);
+
+const historyKey = (accountId: string, win: HistoryWindowKind): string => `${accountId}|${win}`;
+
+const disposeList = (list: Array<() => void>): void => {
+  for (const fn of list) {
     try {
       fn();
     } catch {
       // ignore
     }
   }
-  activeDisposers = [];
 };
 
-const track = <T extends { dispose: () => void }>(handle: T): T => {
-  activeDisposers.push(() => handle.dispose());
-  return handle;
+const clearAllScrubs = (): void => {
+  for (const fn of activeChartClearers) {
+    try {
+      fn();
+    } catch {
+      // ignore
+    }
+  }
 };
+
+document.addEventListener('pointerdown', (e) => {
+  const target = e.target as Element | null;
+  if (!target?.closest('.pq-chart-box')) {
+    clearAllScrubs();
+  }
+});
+
+// ---------- Persistent UI Preferences (host.storage) ----------
+
+const loadUiPrefs = async (): Promise<void> => {
+  try {
+    const saved = await host.storage.get(STORAGE_UI_PREFS_KEY);
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      const record = saved as Record<string, unknown>;
+      if (typeof record.aisFullExpanded === 'boolean' && record.aisFullExpanded !== aisFullExpanded) {
+        aisFullExpanded = record.aisFullExpanded;
+        if (currentState?.snapshot) {
+          render();
+        }
+      }
+    }
+  } catch {
+    // Storage unavailable on older host; keep in-memory default
+  }
+};
+
+const persistUiPrefs = (): void => {
+  void host.storage.set(STORAGE_UI_PREFS_KEY, {
+    aisFullExpanded,
+  }).catch(() => {
+    // ignore storage errors
+  });
+};
+
+// ---------- Scroll Preservation ----------
+
+interface ScrollSnapshot {
+  winX: number;
+  winY: number;
+  docTop: number;
+  bodyTop: number;
+  rootTop: number;
+  prevHeight: number;
+}
+
+const captureScroll = (): ScrollSnapshot => ({
+  winX: window.scrollX || 0,
+  winY: window.scrollY || 0,
+  docTop: document.documentElement?.scrollTop || 0,
+  bodyTop: document.body?.scrollTop || 0,
+  rootTop: root.scrollTop || 0,
+  prevHeight: root.getBoundingClientRect().height,
+});
+
+const restoreScroll = (saved: ScrollSnapshot): void => {
+  const apply = (): void => {
+    if (saved.rootTop > 0) root.scrollTop = saved.rootTop;
+    if (saved.docTop > 0 && document.documentElement) {
+      document.documentElement.scrollTop = saved.docTop;
+    }
+    if (saved.bodyTop > 0 && document.body) {
+      document.body.scrollTop = saved.bodyTop;
+    }
+    const targetY = saved.winY || saved.docTop || saved.bodyTop;
+    if (targetY > 0 || saved.winX > 0) {
+      window.scrollTo({ left: saved.winX, top: targetY, behavior: 'instant' as ScrollBehavior });
+    }
+  };
+  apply();
+  requestAnimationFrame(() => {
+    apply();
+    root.style.minHeight = '';
+  });
+};
+
+// ---------- Service Calls ----------
 
 const callService = async <T>(
   method: 'GET' | 'POST',
@@ -424,23 +1429,1203 @@ const callService = async <T>(
   return parsed as T;
 };
 
-const loadState = async (force = false): Promise<void> => {
+const cacheHistory = (data: AntigravityHistoryResponse | null | undefined): void => {
+  if (!data || !data.account_id) return;
+  const win: HistoryWindowKind = data.window === '7d' ? '7d' : '5h';
+  historyCache.set(historyKey(data.account_id, win), {
+    data,
+    fetchedAtMs: Date.now(),
+  });
+};
+
+// ---------- Mini Cycle Burn Trend SVG ----------
+
+const buildHistorySvg = (
+  history: AntigravityHistoryResponse,
+  windowKind: HistoryWindowKind,
+  acct: AntigravityAccount,
+  clearers: Set<() => void>,
+): HTMLElement => {
+  const box = el('div');
+  const allowArgon = canShowArgonForTier(acct.tier);
+
+  const rawSeries = (history.series ?? []).filter((s) => {
+    if (!allowArgon && isArgonKey(s.key, s.group)) return false;
+    return Array.isArray(s.points) && s.points.length >= 2;
+  });
+
+  if (rawSeries.length === 0) {
+    box.appendChild(el('div', 'pq-chart-empty', `暂无 ${windowKind === '7d' ? '7d' : '5h'} 历史采样曲线`));
+    return box;
+  }
+
+  const paintSeries = [...rawSeries].sort((a, b) => {
+    const ia = SERIES_PAINT_ORDER.indexOf(a.key);
+    const ib = SERIES_PAINT_ORDER.indexOf(b.key);
+    return (ia === -1 ? 0 : ia) - (ib === -1 ? 0 : ib);
+  });
+
+  const legendSeries = [...rawSeries].sort((a, b) => {
+    const ia = SERIES_LEGEND_ORDER.indexOf(a.key);
+    const ib = SERIES_LEGEND_ORDER.indexOf(b.key);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  const W = 320;
+  const H = 112;
+  const PAD_L = 30;
+  const PAD_R = 8;
+  const PAD_T = 10;
+  const PAD_B = 18;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+  const yBase = PAD_T + innerH;
+
+  let minT = Number.POSITIVE_INFINITY;
+  let maxT = Number.NEGATIVE_INFINITY;
+  for (const s of rawSeries) {
+    for (const pt of s.points) {
+      const tMs = toMs(pt[0]);
+      if (tMs < minT) minT = tMs;
+      if (tMs > maxT) maxT = tMs;
+    }
+  }
+  const spanT = Math.max(1, maxT - minT);
+  const xFor = (tMs: number): number => PAD_L + ((tMs - minT) / spanT) * innerW;
+  const yFor = (rem: number): number => PAD_T + innerH * (1 - clampPercent(rem) / 100);
+
+  // Interactive readout strip above SVG
+  const readoutBar = el('div', 'pq-chart-readout');
+
+  const renderDefaultReadout = (): void => {
+    readoutBar.classList.remove('is-scrubbing');
+    readoutBar.replaceChildren();
+    const items = el('div', 'pq-readout-items');
+    for (const s of legendSeries) {
+      const latestRem = clampPercent(s.points[s.points.length - 1]?.[1] ?? s.remaining);
+      const lv = healthLevelFor(latestRem);
+      const item = el('span', 'pq-readout-item');
+      const dot = el('span', 'pq-fam-dot');
+      dot.style.background = seriesColorVar(s.key, s.group);
+      item.appendChild(dot);
+      item.appendChild(el('span', 'pq-muted', shortSeriesLabel(s)));
+      item.appendChild(el('strong', `pq-mono pq-lv-${lv}`, formatPercent(latestRem)));
+      items.appendChild(item);
+    }
+    readoutBar.appendChild(items);
+    readoutBar.appendChild(el('span', 'pq-readout-hint', '悬停/滑动'));
+  };
+
+  renderDefaultReadout();
+  box.appendChild(readoutBar);
+
+  // SVG Canvas
+  const svgWrap = el('div', 'pq-chart-svg-wrap');
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`,
+    class: 'pq-chart-svg',
+    role: 'img',
+    'aria-label': `${windowKind} 周期剩余趋势`,
+  });
+
+  const defs = svgEl('defs');
+  const gradIdByKey = new Map<string, string>();
+  for (const s of paintSeries) {
+    const gid = `pq-grad-${++svgGradSeq}`;
+    gradIdByKey.set(s.key, gid);
+    const color = seriesColorVar(s.key, s.group);
+    const grad = svgEl('linearGradient', { id: gid, x1: '0', y1: '0', x2: '0', y2: '1' });
+    grad.appendChild(svgEl('stop', { offset: '0%', 'stop-color': color, 'stop-opacity': '0.26' }));
+    grad.appendChild(svgEl('stop', { offset: '100%', 'stop-color': color, 'stop-opacity': '0.01' }));
+    defs.appendChild(grad);
+  }
+  svg.appendChild(defs);
+
+  // Y-axis grid lines & micro-labels (100% / 50% / 0% + subtle 25% warning line)
+  for (const pct of [100, 50, 25, 0]) {
+    const y = yFor(pct);
+    const isWarn = pct === 25;
+    const isZero = pct === 0;
+    svg.appendChild(svgEl('line', {
+      x1: PAD_L,
+      x2: W - PAD_R,
+      y1: y.toFixed(1),
+      y2: y.toFixed(1),
+      stroke: isWarn ? 'var(--pq-low)' : 'var(--pq-border)',
+      'stroke-opacity': isWarn ? '0.26' : isZero ? '0.75' : '0.45',
+      'stroke-dasharray': isZero ? '' : '2.5 3',
+      'stroke-width': '1',
+    }));
+
+    if (pct === 100 || pct === 50 || pct === 0) {
+      const label = svgEl('text', {
+        x: PAD_L - 4,
+        y: (y + 3).toFixed(1),
+        'text-anchor': 'end',
+        class: 'pq-svg-axis',
+      });
+      label.textContent = `${pct}%`;
+      svg.appendChild(label);
+    }
+  }
+
+  // Series area gradients, crisp strokes, and latest point markers
+  const normalizedPoints = new Map<string, Array<{ t: number; r: number; x: number; y: number }>>();
+
+  for (const s of paintSeries) {
+    const color = seriesColorVar(s.key, s.group);
+    const gid = gradIdByKey.get(s.key)!;
+    const pts = s.points.map((pt) => {
+      const t = toMs(pt[0]);
+      const r = clampPercent(pt[1]);
+      return { t, r, x: xFor(t), y: yFor(r) };
+    });
+    normalizedPoints.set(s.key, pts);
+
+    // Split segments when remaining jumps upward sharply (cycle reset)
+    const segments: Array<typeof pts> = [];
+    let currentSeg: typeof pts = [];
+    for (let i = 0; i < pts.length; i += 1) {
+      const p = pts[i]!;
+      const prev = currentSeg[currentSeg.length - 1];
+      if (prev && p.r - prev.r > 12) {
+        if (currentSeg.length > 0) segments.push(currentSeg);
+        currentSeg = [p];
+      } else {
+        currentSeg.push(p);
+      }
+    }
+    if (currentSeg.length > 0) segments.push(currentSeg);
+
+    for (const seg of segments) {
+      if (seg.length >= 2) {
+        const lineD = seg.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        const first = seg[0]!;
+        const last = seg[seg.length - 1]!;
+        const areaD = `M${first.x.toFixed(1)},${yBase.toFixed(1)} ${seg.map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} L${last.x.toFixed(1)},${yBase.toFixed(1)} Z`;
+
+        svg.appendChild(svgEl('path', {
+          d: areaD,
+          fill: `url(#${gid})`,
+          stroke: 'none',
+        }));
+
+        svg.appendChild(svgEl('path', {
+          d: lineD,
+          fill: 'none',
+          stroke: color,
+          'stroke-width': '1.9',
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+        }));
+      }
+    }
+
+    // Latest point glowing halo + crisp marker dot
+    const lastPt = pts[pts.length - 1];
+    if (lastPt) {
+      svg.appendChild(svgEl('circle', {
+        cx: lastPt.x.toFixed(1),
+        cy: lastPt.y.toFixed(1),
+        r: '4.6',
+        fill: color,
+        'fill-opacity': '0.24',
+      }));
+      svg.appendChild(svgEl('circle', {
+        cx: lastPt.x.toFixed(1),
+        cy: lastPt.y.toFixed(1),
+        r: '2.5',
+        fill: color,
+        stroke: 'var(--pq-surface)',
+        'stroke-width': '1.2',
+      }));
+    }
+  }
+
+  // X-axis start / mid / end time micro-labels (tabular-nums)
+  const axisMode: 'hm' | 'md' = (windowKind === '7d' || spanT >= 36 * 3600 * 1000) ? 'md' : 'hm';
+  const xTicks: Array<{ x: number; t: number; anchor: 'start' | 'middle' | 'end' }> = [
+    { x: PAD_L, t: minT, anchor: 'start' },
+    { x: PAD_L + innerW / 2, t: minT + spanT / 2, anchor: 'middle' },
+    { x: W - PAD_R, t: maxT, anchor: 'end' },
+  ];
+  for (const tick of xTicks) {
+    const label = svgEl('text', {
+      x: tick.x.toFixed(1),
+      y: String(H - 3),
+      'text-anchor': tick.anchor,
+      class: 'pq-svg-axis',
+    });
+    label.textContent = formatAxisTime(tick.t, axisMode);
+    svg.appendChild(label);
+  }
+
+  // Scrub hairline + active point highlight circles
+  const scrubLine = svgEl('line', {
+    x1: PAD_L,
+    x2: PAD_L,
+    y1: PAD_T,
+    y2: yBase,
+    stroke: 'var(--pq-fg)',
+    'stroke-opacity': '0.42',
+    'stroke-width': '1',
+    'stroke-dasharray': '2.5 2.5',
+    'pointer-events': 'none',
+  });
+  scrubLine.style.display = 'none';
+  svg.appendChild(scrubLine);
+
+  const scrubDots = new Map<string, SVGCircleElement>();
+  for (const s of paintSeries) {
+    const dot = svgEl('circle', {
+      cx: PAD_L,
+      cy: PAD_T,
+      r: '3.6',
+      fill: 'var(--pq-surface)',
+      stroke: seriesColorVar(s.key, s.group),
+      'stroke-width': '2',
+      'pointer-events': 'none',
+    });
+    dot.style.display = 'none';
+    svg.appendChild(dot);
+    scrubDots.set(s.key, dot);
+  }
+
+  // Transparent pointer hit area
+  const hitRect = svgEl('rect', {
+    x: PAD_L,
+    y: PAD_T,
+    width: innerW,
+    height: innerH,
+    fill: 'transparent',
+  });
+  hitRect.style.cursor = 'crosshair';
+  svg.appendChild(hitRect);
+
+  let scrubbing = false;
+  let touchDragging = false;
+
+  const clearScrub = (): void => {
+    if (!scrubbing) return;
+    scrubbing = false;
+    touchDragging = false;
+    activeScrubCount = Math.max(0, activeScrubCount - 1);
+    scrubLine.style.display = 'none';
+    for (const dot of scrubDots.values()) {
+      dot.style.display = 'none';
+    }
+    renderDefaultReadout();
+  };
+
+  const findNearestPoint = (pts: Array<{ t: number; r: number; x: number; y: number }>, targetT: number) => {
+    let best = pts[0]!;
+    let bestDist = Math.abs(best.t - targetT);
+    for (let i = 1; i < pts.length; i += 1) {
+      const p = pts[i]!;
+      const d = Math.abs(p.t - targetT);
+      if (d <= bestDist) {
+        best = p;
+        bestDist = d;
+      } else if (p.t > targetT) {
+        break;
+      }
+    }
+    return best;
+  };
+
+  const updateScrubAtClientX = (clientX: number, isTouch: boolean): void => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const relX = Math.max(PAD_L, Math.min(W - PAD_R, ((clientX - rect.left) / rect.width) * W));
+    const tHover = minT + ((relX - PAD_L) / innerW) * spanT;
+
+    if (!scrubbing) {
+      scrubbing = true;
+      activeScrubCount += 1;
+    }
+
+    let snappedTime = tHover;
+    const entries: Array<{ s: AntigravityHistorySeries; r: number }> = [];
+
+    for (const s of legendSeries) {
+      const pts = normalizedPoints.get(s.key);
+      if (!pts || pts.length === 0) continue;
+      const nearest = findNearestPoint(pts, tHover);
+      snappedTime = nearest.t;
+      entries.push({ s, r: nearest.r });
+      const dot = scrubDots.get(s.key);
+      if (dot) {
+        dot.setAttribute('cx', nearest.x.toFixed(1));
+        dot.setAttribute('cy', nearest.y.toFixed(1));
+        dot.style.display = '';
+      }
+    }
+
+    const lineX = xFor(snappedTime);
+    scrubLine.setAttribute('x1', lineX.toFixed(1));
+    scrubLine.setAttribute('x2', lineX.toFixed(1));
+    scrubLine.style.display = '';
+
+    readoutBar.classList.add('is-scrubbing');
+    readoutBar.replaceChildren();
+    const items = el('div', 'pq-readout-items');
+    items.appendChild(el('span', 'pq-readout-time pq-mono', formatScrubTime(snappedTime)));
+    for (const { s, r } of entries) {
+      const lv = healthLevelFor(r);
+      const item = el('span', 'pq-readout-item');
+      const dot = el('span', 'pq-fam-dot');
+      dot.style.background = seriesColorVar(s.key, s.group);
+      item.appendChild(dot);
+      item.appendChild(el('span', 'pq-muted', shortSeriesLabel(s)));
+      item.appendChild(el('strong', `pq-mono pq-lv-${lv}`, formatPercent(r)));
+      items.appendChild(item);
+    }
+    readoutBar.appendChild(items);
+
+    if (isTouch) {
+      const closeBtn = el('button', 'pq-readout-clear', '×');
+      closeBtn.type = 'button';
+      closeBtn.title = '关闭读数';
+      closeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        clearScrub();
+      });
+      readoutBar.appendChild(closeBtn);
+    }
+  };
+
+  svg.addEventListener('pointerdown', (e) => {
+    const isTouch = e.pointerType !== 'mouse';
+    if (isTouch) touchDragging = true;
+    updateScrubAtClientX(e.clientX, isTouch);
+  });
+
+  svg.addEventListener('pointermove', (e) => {
+    const isTouch = e.pointerType !== 'mouse';
+    if (!isTouch || touchDragging) {
+      updateScrubAtClientX(e.clientX, isTouch);
+    }
+  });
+
+  svg.addEventListener('pointerup', () => {
+    touchDragging = false;
+  });
+
+  svg.addEventListener('pointercancel', () => {
+    touchDragging = false;
+  });
+
+  svg.addEventListener('pointerleave', (e) => {
+    if (e.pointerType === 'mouse') {
+      clearScrub();
+    }
+  });
+
+  clearers.add(clearScrub);
+  (box as HTMLElement & { __pqClearScrub?: () => void }).__pqClearScrub = clearScrub;
+  svgWrap.appendChild(svg);
+  box.appendChild(svgWrap);
+  return box;
+};
+
+// ---------- Account History In-Place Loader ----------
+
+const swapChartBodyNode = (chartBody: HTMLElement, nextNode: HTMLElement): void => {
+  const prevClear = chartBodyClearer.get(chartBody);
+  if (prevClear) {
+    try {
+      prevClear();
+    } catch {
+      // ignore
+    }
+    activeChartClearers.delete(prevClear);
+    chartBodyClearer.delete(chartBody);
+  }
+  const nextClear = (nextNode as HTMLElement & { __pqClearScrub?: () => void }).__pqClearScrub;
+  if (nextClear) {
+    chartBodyClearer.set(chartBody, nextClear);
+  }
+  chartBody.replaceChildren(nextNode);
+};
+
+const mountChartContent = (
+  chartBody: HTMLElement,
+  acct: AntigravityAccount,
+  win: HistoryWindowKind,
+  forceFetch = false,
+): void => {
+  const key = historyKey(acct.id, win);
+  const cached = historyCache.get(key);
+  const now = Date.now();
+
+  if (cached) {
+    swapChartBodyNode(chartBody, buildHistorySvg(cached.data, win, acct, activeChartClearers));
+    if (!forceFetch && now - cached.fetchedAtMs < HISTORY_FRESH_MS) {
+      return;
+    }
+  } else {
+    const loadingBox = el('div', 'pq-chart-loading');
+    loadingBox.textContent = `加载 ${win === '7d' ? '7d' : '5h'} 燃烧趋势…`;
+    swapChartBodyNode(chartBody, loadingBox);
+  }
+
+  if (historyInFlight.has(key)) return;
+  historyInFlight.add(key);
+
+  void callService<AntigravityHistoryResponse>('GET', '/panel/history', {
+    query: {
+      account: acct.id,
+      window: win,
+      range: win === '7d' ? '7d' : '24h',
+      ...(forceFetch ? { force: '1' } : {}),
+    },
+  })
+    .then((data) => {
+      cacheHistory(data);
+      if (!chartBody.isConnected) return;
+      if (getAccountWindow(acct.id) !== win) return;
+      swapChartBodyNode(chartBody, buildHistorySvg(data, win, acct, activeChartClearers));
+    })
+    .catch(() => {
+      if (!chartBody.isConnected) return;
+      if (getAccountWindow(acct.id) !== win) return;
+      if (!cached) {
+        swapChartBodyNode(chartBody, el('div', 'pq-chart-empty', '历史趋势暂不可用'));
+      }
+    })
+    .finally(() => {
+      historyInFlight.delete(key);
+    });
+};
+
+// ---------- Antigravity Recent 200m Micro-Capsule Strip ----------
+
+const renderRecent200mStrip = (
+  history: AntigravityAccountHistory | undefined,
+  snapshotMs: number,
+): HTMLElement | null => {
+  if (!history) return null;
+
+  if (history.has_recent_buckets && Array.isArray(history.recent_buckets) && history.recent_buckets.length > 0) {
+    const buckets = history.recent_buckets;
+    const okTotal = history.recent_window_success || 0;
+    const failTotal = history.recent_window_failure || 0;
+    const hasData = okTotal + failTotal > 0;
+    const rate = history.recent_window_rate;
+    const windowMins = history.recent_window_minutes || 200;
+    const defaultLabelText = `近 ${windowMins}m 成功率`;
+
+    const strip = el('div', 'pq-recent-strip');
+    const top = el('div', 'pq-recent-top');
+    const labelEl = el('span', 'pq-recent-label pq-num', defaultLabelText);
+    top.appendChild(labelEl);
+
+    const meta = el('div', 'pq-recent-meta pq-mono');
+    if (hasData) {
+      meta.appendChild(el('span', 'pq-recent-ok', `✓${okTotal}`));
+      if (failTotal > 0) {
+        meta.appendChild(el('span', 'pq-recent-fail', `✕${failTotal}`));
+      }
+    }
+
+    const rateCls = !hasData || rate == null
+      ? ''
+      : rate >= 95
+        ? 'is-high'
+        : rate >= 80
+          ? 'is-med'
+          : 'is-low';
+    const rateText = hasData && rate != null ? formatPercent(rate) : '空闲';
+    meta.appendChild(el('span', `pq-rate-capsule ${rateCls}`, rateText));
+    top.appendChild(meta);
+    strip.appendChild(top);
+
+    const bucketRow = el('div', 'pq-buckets');
+    const bucketMs = 10 * 60 * 1000;
+    const startMs = (snapshotMs || Date.now()) - buckets.length * bucketMs;
+    let focusedNode: HTMLElement | null = null;
+
+    buckets.forEach((b, idx) => {
+      const ok = b.success || 0;
+      const fail = b.failed || 0;
+      const tot = ok + fail;
+      const idle = tot === 0;
+      const cell = el('div', `pq-bucket${idle ? '' : ' is-active'}`);
+      if (!idle) {
+        cell.style.background = rateToRgb(ok / tot);
+      }
+      const rangeStr = b.time || `${formatAxisTime(startMs + idx * bucketMs, 'hm')}-${formatAxisTime(startMs + (idx + 1) * bucketMs, 'hm')}`;
+      const detailText = idle
+        ? `${rangeStr} · 无请求`
+        : `${rangeStr} · ✓${ok}${fail > 0 ? ` ✕${fail}` : ''} (${formatPercent((ok / tot) * 100)})`;
+      cell.title = detailText;
+
+      const focusCell = (): void => {
+        if (focusedNode && focusedNode !== cell) focusedNode.classList.remove('is-focus');
+        focusedNode = cell;
+        cell.classList.add('is-focus');
+        labelEl.textContent = detailText;
+      };
+
+      cell.addEventListener('pointerenter', (e) => {
+        if (e.pointerType === 'mouse') focusCell();
+      });
+      cell.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (focusedNode === cell) {
+          cell.classList.remove('is-focus');
+          focusedNode = null;
+          labelEl.textContent = defaultLabelText;
+        } else {
+          focusCell();
+        }
+      });
+
+      bucketRow.appendChild(cell);
+    });
+
+    bucketRow.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse') {
+        if (focusedNode) focusedNode.classList.remove('is-focus');
+        focusedNode = null;
+        labelEl.textContent = defaultLabelText;
+      }
+    });
+
+    strip.appendChild(bucketRow);
+    return strip;
+  }
+
+  if (Array.isArray(history.recent_bars) && history.recent_bars.length > 0) {
+    const bars = history.recent_bars;
+    const rate = history.recent_success_rate;
+    const strip = el('div', 'pq-recent-strip');
+    const top = el('div', 'pq-recent-top');
+    top.appendChild(el('span', 'pq-recent-label pq-num', `近 ${bars.length} 次请求`));
+    const rateCls = rate == null ? '' : rate >= 95 ? 'is-high' : rate >= 80 ? 'is-med' : 'is-low';
+    top.appendChild(el('span', `pq-rate-capsule pq-mono ${rateCls}`, rate != null ? formatPercent(rate) : '--'));
+    strip.appendChild(top);
+
+    const row = el('div', 'pq-buckets');
+    for (const bar of bars) {
+      const cell = el('div', 'pq-bucket is-active');
+      cell.style.background = bar.ok ? 'var(--pq-healthy-bar)' : 'var(--pq-low-bar)';
+      row.appendChild(cell);
+    }
+    strip.appendChild(row);
+    return strip;
+  }
+
+  if (history.available && history.success_rate != null) {
+    const strip = el('div', 'pq-recent-strip');
+    const top = el('div', 'pq-recent-top');
+    top.appendChild(el('span', 'pq-recent-label', '历史成功率'));
+    const r = history.success_rate;
+    const rateCls = r >= 95 ? 'is-high' : r >= 80 ? 'is-med' : 'is-low';
+    top.appendChild(el('span', `pq-rate-capsule pq-mono ${rateCls}`, formatPercent(r)));
+    strip.appendChild(top);
+    return strip;
+  }
+
+  return null;
+};
+
+// ---------- Antigravity Card ----------
+
+const renderAgWindowActive = (win: AntigravityWindow): HTMLElement => {
+  const rem = clampPercent(win.remaining_percent);
+  const lv = healthLevelFor(rem);
+  const box = el('div', `pq-win-active${lv === 'empty' ? ' is-empty' : ''}`);
+
+  const top = el('div', 'pq-win-top');
+  const nameWrap = el('div', 'pq-win-name-wrap');
+  const dot = el('span', 'pq-fam-dot');
+  dot.style.background = seriesColorVar(win.key, win.group);
+  nameWrap.appendChild(dot);
+  nameWrap.appendChild(el('span', 'pq-win-name', win.label || win.key));
+  top.appendChild(nameWrap);
+
+  const valWrap = el('div', 'pq-win-val-wrap');
+  if (lv === 'empty') {
+    valWrap.appendChild(el('span', 'pq-pill pq-pill-empty', '已耗尽'));
+  }
+  valWrap.appendChild(el('span', `pq-win-val pq-lv-${lv}`, `剩 ${formatPercent(rem)}`));
+  top.appendChild(valWrap);
+  box.appendChild(top);
+
+  const trackBar = el('div', `pq-bar-track${lv === 'empty' ? ' is-empty' : ''}`);
+  const fill = el('div', `pq-bar-fill pq-bar-${lv}`);
+  fill.style.width = `${rem}%`;
+  trackBar.appendChild(fill);
+  box.appendChild(trackBar);
+
+  const sub = el('div', 'pq-win-sub');
+  const usageWrap = el('div', 'pq-win-usage pq-mono');
+  if (win.has_current_usage && (win.current_cost > 0 || win.current_tokens > 0)) {
+    const parts = [`已用 ${formatUsd(win.current_cost)}`];
+    if (win.current_tokens > 0) parts.push(formatTokens(win.current_tokens));
+    usageWrap.appendChild(el('span', '', parts.join(' / ')));
+    if (win.has_forecast && win.forecast_cost > 0) {
+      const tag = win.forecast_basis === 'previous' ? '参考' : '预测';
+      usageWrap.appendChild(el('span', '', `· ${tag} ${formatUsd(win.forecast_cost)}`));
+    }
+  } else {
+    usageWrap.appendChild(el('span', '', '本窗暂无费用记录'));
+  }
+  sub.appendChild(usageWrap);
+
+  if (win.stale) {
+    sub.appendChild(el('span', 'pq-win-reset pq-mono', '待采样'));
+  } else if (win.reset_at_ms > 0) {
+    sub.appendChild(el('span', 'pq-win-reset pq-mono', `重置 ${formatCountdown(win.reset_at_ms)}`));
+  }
+  box.appendChild(sub);
+  return box;
+};
+
+const renderAgWindowIdleTile = (win: AntigravityWindow): HTMLElement => {
+  const tile = el('div', 'pq-win-idle-tile');
+
+  const top = el('div', 'pq-win-idle-top');
+  const nameWrap = el('span', 'pq-win-idle-name');
+  const dot = el('span', 'pq-fam-dot');
+  dot.style.background = seriesColorVar(win.key, win.group);
+  nameWrap.appendChild(dot);
+  nameWrap.appendChild(el('span', '', win.label || win.key));
+  top.appendChild(nameWrap);
+  top.appendChild(el('span', 'pq-win-idle-pct pq-mono', '100%'));
+  tile.appendChild(top);
+
+  const trackBar = el('div', 'pq-bar-track is-thin');
+  const fill = el('div', 'pq-bar-fill pq-bar-full');
+  fill.style.width = '100%';
+  trackBar.appendChild(fill);
+  tile.appendChild(trackBar);
+
+  const subText = (!win.stale && win.reset_at_ms > 0)
+    ? `满血 · ${formatCountdown(win.reset_at_ms)}`
+    : '满血未动用';
+  tile.appendChild(el('div', 'pq-win-idle-sub pq-mono', subText));
+  return tile;
+};
+
+const renderAgAccountBlock = (
+  acct: AntigravityAccount,
+  snapshotMs: number,
+  disposers: Array<() => void>,
+): HTMLElement => {
+  const block = el('div', 'pq-acct-block');
+
+  // Account Identity Header
+  const head = el('div', 'pq-acct-head');
+  const idGroup = el('div', 'pq-acct-id');
+  idGroup.appendChild(el('span', 'pq-acct-name', acct.code_name || acct.id));
+  if (acct.tier) {
+    idGroup.appendChild(el('span', `pq-pill ${tierClass(acct.tier)}`, acct.tier));
+  }
+  head.appendChild(idGroup);
+
+  const statusText = acct.status_label || (acct.status === 'available' ? '可用' : acct.status || '未知');
+  head.appendChild(el('span', `pq-pill ${accountStatusClass(acct.status)}`, statusText));
+  block.appendChild(head);
+
+  // Recent 200m success rate capsule / micro-bar
+  const recentStrip = renderRecent200mStrip(acct.history, snapshotMs);
+  if (recentStrip) {
+    block.appendChild(recentStrip);
+  }
+
+  // Quota Windows: Ultra hides Argon + Active-first layout
+  const filtered = filterAccountWindows(acct).sort((a, b) => {
+    const ia = WINDOW_ORDER.indexOf(a.key);
+    const ib = WINDOW_ORDER.indexOf(b.key);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  const activeWins = filtered.filter(isActiveAgWindow);
+  const idleWins = filtered.filter((w) => !isActiveAgWindow(w));
+
+  if (activeWins.length > 0) {
+    const activeList = el('div', 'pq-win-list');
+    for (const w of activeWins) {
+      activeList.appendChild(renderAgWindowActive(w));
+    }
+    block.appendChild(activeList);
+  }
+
+  if (idleWins.length > 0) {
+    const idleGrid = el('div', `pq-win-idle-grid${idleWins.length === 1 ? ' is-single' : ''}`);
+    for (const w of idleWins) {
+      idleGrid.appendChild(renderAgWindowIdleTile(w));
+    }
+    block.appendChild(idleGrid);
+  }
+
+  if (filtered.length === 0) {
+    block.appendChild(el('div', 'pq-muted', '暂无配额窗口采样'));
+  }
+
+  // Mini Cycle Burn Trend Chart (zero-flicker local tab switch)
+  if (acct.has_history) {
+    const chartBox = el('div', 'pq-chart-box');
+    const chartHead = el('div', 'pq-chart-head');
+    chartHead.appendChild(el('span', 'pq-chart-title', '周期燃烧趋势'));
+
+    const tabsWrap = el('div', 'pq-chart-tabs');
+    const chartBody = el('div', 'pq-chart-body');
+    chartBody.dataset.pqChartBody = acct.id;
+    const activeWin = getAccountWindow(acct.id);
+
+    let tabsHandle: TabsHandle | null = null;
+    tabsHandle = mountTabs(tabsWrap, {
+      items: [
+        { id: '5h', label: '5h' },
+        { id: '7d', label: '7d' },
+      ],
+      activeId: activeWin,
+      trackBackground: true,
+      onChange: (next) => {
+        if (next !== '5h' && next !== '7d') return;
+        accountHistoryWindow.set(acct.id, next);
+        tabsHandle?.update({ activeId: next });
+        mountChartContent(chartBody, acct, next, false);
+      },
+    });
+    disposers.push(() => tabsHandle?.dispose());
+
+    chartHead.appendChild(tabsWrap);
+    chartBox.appendChild(chartHead);
+    chartBox.appendChild(chartBody);
+    block.appendChild(chartBox);
+
+    mountChartContent(chartBody, acct, activeWin, false);
+  }
+
+  return block;
+};
+
+const renderAgCard = (snapshot: BoardSnapshot, disposers: Array<() => void>): HTMLElement => {
+  const card = el('div', 'pq-card');
+  const ag = snapshot.antigravity;
+
+  const head = el('div', 'pq-card-head');
+  const headLeft = el('div', 'pq-card-head-left');
+  headLeft.appendChild(el('h4', 'pq-card-title', 'Antigravity 号池'));
+
+  // Show compact tier summary pills when multi-account pool is active
+  if (ag.online && ag.accounts.length > 1 && ag.summary?.tier_counts) {
+    for (const tierName of ['Ultra', 'Pro', 'Free']) {
+      const cnt = ag.summary.tier_counts[tierName] ?? 0;
+      if (cnt > 0) {
+        headLeft.appendChild(el('span', `pq-pill pq-num ${tierClass(tierName)}`, `${tierName}×${cnt}`));
+      }
+    }
+  }
+  head.appendChild(headLeft);
+
+  const badgeWrap = el('div');
+  const activeCount = ag.summary?.active_accounts ?? ag.accounts.length;
+  const badgeHandle = mountBadge(badgeWrap, {
+    label: ag.online ? `${activeCount} 号在线` : '离线',
+    tone: ag.online ? (ag.status === 'degraded' ? 'warning' : 'success') : 'error',
+  });
+  disposers.push(() => badgeHandle.dispose());
+  head.appendChild(badgeWrap);
+  card.appendChild(head);
+
+  if (!ag.online || !Array.isArray(ag.accounts) || ag.accounts.length === 0) {
+    card.appendChild(el('div', 'pq-muted', ag.status_message || '暂无活跃 Antigravity 账号数据'));
+    return card;
+  }
+
+  const acctList = el('div', 'pq-acct-list');
+  for (const acct of ag.accounts) {
+    acctList.appendChild(renderAgAccountBlock(acct, snapshot.generated_at_ms, disposers));
+  }
+  card.appendChild(acctList);
+
+  return card;
+};
+
+// ---------- AIStudio Card (Active-First + Full-Health Fold Group) ----------
+
+const renderAisModelRow = (model: AIStudioModelSummary, compactFull = false): HTMLElement => {
+  const rem = clampPercent(model.effective_percent);
+  const exhausted = model.eligible_accounts > 0 && model.available_accounts === 0;
+  const lv = healthLevelFor(rem, exhausted);
+
+  const row = el(
+    'div',
+    `pq-model-row${lv === 'empty' ? ' is-empty' : ''}${compactFull ? ' is-full-compact' : ''}`,
+  );
+
+  const top = el('div', 'pq-model-top');
+  top.appendChild(el('span', 'pq-model-name', model.label || model.id));
+
+  const right = el('div', 'pq-model-right');
+  if (exhausted) {
+    right.appendChild(el('span', 'pq-pill pq-pill-empty', '已耗尽'));
+  } else if (!compactFull && model.eligible_accounts > 0 && (rem < 99.5 || model.used_requests > 0 || model.used_tokens > 0)) {
+    const tokShort = isBottleneckTokens(model);
+    right.appendChild(el(
+      'span',
+      `pq-pill ${tokShort ? 'pq-bottleneck-tok' : 'pq-bottleneck-req'}`,
+      tokShort ? 'Token 短板' : '次数短板',
+    ));
+  }
+  right.appendChild(el('span', `pq-win-val pq-lv-${lv}`, formatPercent(rem)));
+  top.appendChild(right);
+  row.appendChild(top);
+
+  const bar = el('div', `pq-bar-track${compactFull ? ' is-thin' : ''}${lv === 'empty' ? ' is-empty' : ''}`);
+  const fill = el('div', `pq-bar-fill pq-bar-${lv}`);
+  fill.style.width = `${rem}%`;
+  bar.appendChild(fill);
+  row.appendChild(bar);
+
+  const sub = el('div', 'pq-win-sub');
+  const acctText = model.cooling_accounts > 0
+    ? `可用 ${model.available_accounts}/${model.eligible_accounts} 号 · ${model.cooling_accounts} 冷却`
+    : `可用 ${model.available_accounts}/${model.eligible_accounts} 号`;
+  sub.appendChild(el('span', 'pq-mono', acctText));
+  sub.appendChild(el('span', 'pq-mono', `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)}`));
+  row.appendChild(sub);
+
+  return row;
+};
+
+const renderAisCard = (snapshot: BoardSnapshot, disposers: Array<() => void>): HTMLElement => {
+  const card = el('div', 'pq-card');
+  const ais = snapshot.aistudio;
+
+  const head = el('div', 'pq-card-head');
+  head.appendChild(el('h4', 'pq-card-title', 'AIStudio2API 号池'));
+
+  const badgeWrap = el('div');
+  const ready = ais.account_counts?.ready ?? 0;
+  const enabled = ais.account_counts?.enabled ?? 0;
+  const badgeHandle = mountBadge(badgeWrap, {
+    label: ais.online ? `${ready}/${enabled} 号就绪` : '离线',
+    tone: ais.online ? (ready === enabled ? 'success' : 'warning') : 'error',
+  });
+  disposers.push(() => badgeHandle.dispose());
+  head.appendChild(badgeWrap);
+  card.appendChild(head);
+
+  if (!ais.online) {
+    card.appendChild(el('div', 'pq-muted', ais.status_message || 'AIStudio2API 当前离线'));
+    return card;
+  }
+
+  const meta = el('div', 'pq-ais-meta pq-mono');
+  const pg = ais.playground;
+  meta.appendChild(el('span', '', `Playground ${pg?.requests ?? 0}次`));
+  if (ais.next_reset_ms > 0) {
+    meta.appendChild(el('span', '', `16:00 重置 · ${formatCountdown(ais.next_reset_ms)}`));
+  }
+  card.appendChild(meta);
+
+  const allModels = Array.isArray(ais.models) ? ais.models : [];
+  if (allModels.length === 0) {
+    card.appendChild(el('div', 'pq-muted', '暂无模型配额数据'));
+    return card;
+  }
+
+  // Partition into active/consumed models vs untouched 100% full-health models
+  const activeModels: AIStudioModelSummary[] = [];
+  const fullModels: AIStudioModelSummary[] = [];
+  for (const model of allModels) {
+    if (isActiveAisModel(model)) {
+      activeModels.push(model);
+    } else {
+      fullModels.push(model);
+    }
+  }
+
+  // Sort active models by lowest remaining / exhausted first
+  activeModels.sort((a, b) => {
+    const aZero = a.eligible_accounts > 0 && a.available_accounts === 0 ? 0 : 1;
+    const bZero = b.eligible_accounts > 0 && b.available_accounts === 0 ? 0 : 1;
+    if (aZero !== bZero) return aZero - bZero;
+    return clampPercent(a.effective_percent) - clampPercent(b.effective_percent);
+  });
+
+  if (activeModels.length > 0) {
+    const activeList = el('div', 'pq-model-list');
+    for (const model of activeModels) {
+      activeList.appendChild(renderAisModelRow(model, false));
+    }
+    card.appendChild(activeList);
+  }
+
+  if (fullModels.length > 0) {
+    const group = el('div', 'pq-full-group');
+    const toggleBtn = el('button', 'pq-full-toggle');
+    toggleBtn.type = 'button';
+
+    const left = el('span', 'pq-full-toggle-left');
+    const dot = el('span', 'pq-fam-dot');
+    dot.style.background = 'var(--pq-full-bar)';
+    left.appendChild(dot);
+
+    const labelSpan = el('span', 'pq-full-toggle-text');
+    const buildToggleText = (expanded: boolean): string => (
+      activeModels.length > 0
+        ? `其余 ${fullModels.length} 个模型 100% 满血 · ${expanded ? '点击收起' : '点击展开'}`
+        : `全部 ${fullModels.length} 个模型 100% 满血 · ${expanded ? '点击收起' : '点击展开'}`
+    );
+    labelSpan.textContent = buildToggleText(aisFullExpanded);
+    left.appendChild(labelSpan);
+
+    const chevron = el('span', `pq-chevron${aisFullExpanded ? ' is-open' : ''}`, '▾');
+    toggleBtn.appendChild(left);
+    toggleBtn.appendChild(chevron);
+    toggleBtn.setAttribute('aria-expanded', String(aisFullExpanded));
+
+    const fullList = el('div', 'pq-full-list');
+    fullList.hidden = !aisFullExpanded;
+    for (const model of fullModels) {
+      fullList.appendChild(renderAisModelRow(model, true));
+    }
+
+    // In-place toggle: zero full re-render, zero scroll jump!
+    toggleBtn.addEventListener('click', () => {
+      aisFullExpanded = !aisFullExpanded;
+      persistUiPrefs();
+      fullList.hidden = !aisFullExpanded;
+      labelSpan.textContent = buildToggleText(aisFullExpanded);
+      chevron.classList.toggle('is-open', aisFullExpanded);
+      toggleBtn.setAttribute('aria-expanded', String(aisFullExpanded));
+    });
+
+    group.appendChild(toggleBtn);
+    group.appendChild(fullList);
+    card.appendChild(group);
+  }
+
+  return card;
+};
+
+// ---------- Bottom Collapsible Connection & Display Settings Card ----------
+
+const syncGearButtonState = (): void => {
+  if (!gearBtnEl) return;
+  gearBtnEl.setAttribute('aria-expanded', String(settingsExpanded));
+};
+
+const renderSettingsCardContent = (card: HTMLElement): void => {
+  disposeList(settingsDisposers);
+  settingsDisposers = [];
+  showAisSwitchHandle = null;
+  compactSwitchHandle = null;
+
+  const hasPasscode = currentState?.config.hasPasscode === true;
+  const showAis = currentState?.config.showAis ?? true;
+  const compactQuota = currentState?.config.compactQuota ?? true;
+  const url = currentState?.config.url ?? draftUrl;
+
+  const frag = document.createDocumentFragment();
+
+  const toggleBtn = el('button', 'pq-settings-toggle');
+  toggleBtn.type = 'button';
+  toggleBtn.setAttribute('aria-expanded', String(settingsExpanded));
+  toggleBtn.appendChild(el('span', 'pq-card-title', '连接与显示设置'));
+  const chevron = el('span', `pq-chevron${settingsExpanded ? ' is-open' : ''}`, '▾');
+  toggleBtn.appendChild(chevron);
+  toggleBtn.addEventListener('click', () => {
+    settingsExpanded = !settingsExpanded;
+    syncGearButtonState();
+    renderSettingsCardContent(card);
+  });
+  frag.appendChild(toggleBtn);
+
+  if (!settingsExpanded) {
+    const parts = [
+      showAis ? 'AIS 显示' : 'AIS 隐藏',
+      compactQuota ? '紧凑文案' : '详细文案',
+      urlHostLabel(url),
+      hasPasscode ? '已设口令' : '无口令',
+    ];
+    frag.appendChild(el('div', 'pq-settings-summary pq-mono', parts.join(' · ')));
+    card.replaceChildren(frag);
+    return;
+  }
+
+  const body = el('div', 'pq-settings-body');
+
+  // Section 1: Display Preferences (moved down from top to free first screen!)
+  const displayGroup = el('div', 'pq-settings-group');
+  displayGroup.appendChild(el('div', 'pq-settings-section-label', '显示偏好'));
+
+  const showAisRoot = el('div');
+  showAisSwitchHandle = mountSwitch(showAisRoot, {
+    label: '显示 AIStudio 号池',
+    description: '同时控制顶栏/Usage 总卡、Work Status 与本面板是否展示 AIS 模型余量',
+    checked: showAis,
+    disabled: savingShowAis,
+    onChange: (checked) => void toggleShowAis(checked),
+  });
+  settingsDisposers.push(() => showAisSwitchHandle?.dispose());
+  displayGroup.appendChild(showAisRoot);
+
+  const compactRoot = el('div');
+  compactSwitchHandle = mountSwitch(compactRoot, {
+    label: '紧凑配额文案（适配手机端）',
+    description: '精简手机端浮层与 Usage 总卡文案避免窄屏叠字；本面板始终展示完整数据',
+    checked: compactQuota,
+    disabled: savingCompact,
+    onChange: (checked) => void toggleCompactQuota(checked),
+  });
+  settingsDisposers.push(() => compactSwitchHandle?.dispose());
+  displayGroup.appendChild(compactRoot);
+
+  body.appendChild(displayGroup);
+
+  // Section 2: Board Connection
+  const connGroup = el('div', 'pq-settings-group');
+  connGroup.appendChild(el('div', 'pq-settings-section-label', '看板连接'));
+
+  const urlRoot = el('div');
+  const urlField = mountTextField(urlRoot, {
+    label: '看板地址 URL',
+    value: draftUrl,
+    placeholder: 'http://127.0.0.1:18380 或 https://your-board.example.com',
+    mono: true,
+    onChange: (value) => {
+      draftUrl = value;
+      draftDirty = true;
+      urlField.update({ value });
+    },
+  });
+  settingsDisposers.push(() => urlField.dispose());
+  connGroup.appendChild(urlRoot);
+
+  const passRoot = el('div');
+  const passField = mountTextField(passRoot, {
+    label: '访问口令 (X-View-Passcode)',
+    value: draftPasscode,
+    password: true,
+    placeholder: hasPasscode ? '已保存口令（留空保存将保持原口令不变）' : '若看板未设口令可留空',
+    helper: '仅写入本机 0600 配置文件，不会回显给前端或暴露给对话上下文。',
+    onChange: (value) => {
+      draftPasscode = value;
+      passField.update({ value });
+    },
+  });
+  settingsDisposers.push(() => passField.dispose());
+  connGroup.appendChild(passRoot);
+
+  if (settingsFeedback) {
+    const fbRoot = el('div');
+    const fbHandle = mountBanner(fbRoot, {
+      tone: settingsFeedback.tone,
+      title: settingsFeedback.text,
+    });
+    settingsDisposers.push(() => fbHandle.dispose());
+    connGroup.appendChild(fbRoot);
+  }
+
+  const actions = el('div', 'pq-settings-actions');
+  const saveRoot = el('div');
+  const saveHandle = mountButton(saveRoot, {
+    label: saving ? '测试中...' : '测试并保存',
+    size: 'sm',
+    loading: saving,
+    disabled: saving,
+    onClick: () => void testAndSaveSettings(false),
+  });
+  settingsDisposers.push(() => saveHandle.dispose());
+  actions.appendChild(saveRoot);
+
+  if (hasPasscode) {
+    const clearRoot = el('div');
+    const clearHandle = mountButton(clearRoot, {
+      label: '清空口令',
+      variant: 'outline',
+      size: 'sm',
+      disabled: saving,
+      onClick: () => void testAndSaveSettings(true),
+    });
+    settingsDisposers.push(() => clearHandle.dispose());
+    actions.appendChild(clearRoot);
+  }
+
+  connGroup.appendChild(actions);
+  body.appendChild(connGroup);
+  frag.appendChild(body);
+  card.replaceChildren(frag);
+};
+
+// ---------- Actions ----------
+
+const refreshAdditionalAccountHistories = (snapshot: BoardSnapshot, force: boolean): void => {
+  const accounts = snapshot.antigravity?.accounts ?? [];
+  for (let i = 1; i < accounts.length; i += 1) {
+    const acct = accounts[i]!;
+    if (!acct.has_history) continue;
+    const win = getAccountWindow(acct.id);
+    const key = historyKey(acct.id, win);
+    const cached = historyCache.get(key);
+    if (!force && cached && Date.now() - cached.fetchedAtMs < HISTORY_FRESH_MS) continue;
+    if (historyInFlight.has(key)) continue;
+    historyInFlight.add(key);
+    void callService<AntigravityHistoryResponse>('GET', '/panel/history', {
+      query: {
+        account: acct.id,
+        window: win,
+        range: win === '7d' ? '7d' : '24h',
+        ...(force ? { force: '1' } : {}),
+      },
+    })
+      .then((data) => {
+        cacheHistory(data);
+        const body = document.querySelector<HTMLElement>(`[data-pq-chart-body="${CSS.escape(acct.id)}"]`);
+        if (body && getAccountWindow(acct.id) === win) {
+          swapChartBodyNode(body, buildHistorySvg(data, win, acct, activeChartClearers));
+        }
+      })
+      .catch(() => {
+        // ignore silent background refresh failures
+      })
+      .finally(() => {
+        historyInFlight.delete(key);
+      });
+  }
+};
+
+const loadState = async (force = false, silent = false): Promise<void> => {
+  if (loading) return;
   loading = true;
-  render();
+
+  if (!currentState) {
+    render();
+  } else if (!silent) {
+    refreshBtnHandle?.update({ loading: true });
+  }
+
+  const primaryAccountId = currentState?.snapshot?.antigravity?.accounts?.[0]?.id;
+  const primaryWin: HistoryWindowKind = primaryAccountId ? getAccountWindow(primaryAccountId) : '5h';
+
   try {
     const state = await callService<PanelStateResponse>('GET', '/panel/state', {
       query: {
         force: force ? '1' : '0',
-        window: historyWindow,
-        range: historyWindow === '7d' ? '7d' : '24h',
+        window: primaryWin,
+        range: primaryWin === '7d' ? '7d' : '24h',
       },
     });
     currentState = state;
+    cacheHistory(state.history);
+
     if (!draftDirty) {
       draftUrl = state.config.url;
     }
     if (state.errorCode === 'unauthorized' || state.errorCode === 'unreachable') {
       settingsExpanded = true;
+    }
+    render();
+    if (state.snapshot) {
+      refreshAdditionalAccountHistories(state.snapshot, force);
     }
   } catch (err) {
     const msg = err instanceof HostRequestError && err.code === 'NO_SERVICE'
@@ -454,13 +2639,19 @@ const loadState = async (force = false): Promise<void> => {
       errorCode: 'unreachable',
       fetchedAtMs: Date.now(),
     };
+    settingsExpanded = true;
+    render();
   } finally {
     loading = false;
-    render();
+    refreshBtnHandle?.update({ loading: false });
   }
 };
 
 const toggleShowAis = async (next: boolean): Promise<void> => {
+  if (savingShowAis) return;
+  savingShowAis = true;
+  const prev = currentState?.config.showAis ?? true;
+  showAisSwitchHandle?.update({ checked: next, disabled: true });
   if (currentState) {
     currentState = { ...currentState, config: { ...currentState.config, showAis: next } };
     render();
@@ -470,48 +2661,65 @@ const toggleShowAis = async (next: boolean): Promise<void> => {
       body: { showAis: next },
     });
     currentState = updated;
+    cacheHistory(updated.history);
     void host.toast({
       kind: 'success',
-      message: next ? '已开启 AIStudio 号池显示（Usage 页点击刷新后同步）' : '已隐藏 AIStudio 号池（Usage 页点击刷新后同步）',
+      message: next
+        ? '已开启 AIStudio 号池显示（Usage 与顶栏刷新后同步）'
+        : '已隐藏 AIStudio 号池（Usage 与顶栏刷新后同步）',
     });
   } catch (err) {
+    if (currentState) {
+      currentState = { ...currentState, config: { ...currentState.config, showAis: prev } };
+    }
     void host.toast({
       kind: 'error',
       message: err instanceof Error ? err.message : '切换失败',
     });
   } finally {
+    savingShowAis = false;
     render();
   }
 };
 
 const toggleCompactQuota = async (next: boolean): Promise<void> => {
+  if (savingCompact) return;
+  savingCompact = true;
+  const prev = currentState?.config.compactQuota ?? true;
+  compactSwitchHandle?.update({ checked: next, disabled: true });
   if (currentState) {
     currentState = { ...currentState, config: { ...currentState.config, compactQuota: next } };
-    render();
   }
   try {
     const updated = await callService<PanelStateResponse>('POST', '/panel/config', {
       body: { compactQuota: next },
     });
     currentState = updated;
+    cacheHistory(updated.history);
     void host.toast({
       kind: 'success',
-      message: next ? '已开启紧凑配额文案（适配手机端，Usage 刷新后同步）' : '已切换为详细配额文案（Usage 刷新后同步）',
+      message: next
+        ? '已开启紧凑配额文案（适配手机端，Usage 刷新后同步）'
+        : '已切换为详细配额文案（Usage 刷新后同步）',
     });
   } catch (err) {
+    if (currentState) {
+      currentState = { ...currentState, config: { ...currentState.config, compactQuota: prev } };
+    }
     void host.toast({
       kind: 'error',
       message: err instanceof Error ? err.message : '切换失败',
     });
   } finally {
-    render();
+    savingCompact = false;
+    compactSwitchHandle?.update({ checked: currentState?.config.compactQuota ?? prev, disabled: false });
   }
 };
 
 const testAndSaveSettings = async (clearPasscode = false): Promise<void> => {
   saving = true;
   settingsFeedback = { tone: 'info', text: '正在测试连接...' };
-  render();
+  if (settingsCardEl) renderSettingsCardContent(settingsCardEl);
   try {
     const res = await callService<{ ok: boolean; summary?: string; message?: string }>('POST', '/panel/test', {
       body: {
@@ -532,285 +2740,88 @@ const testAndSaveSettings = async (clearPasscode = false): Promise<void> => {
     draftDirty = false;
     settingsFeedback = { tone: 'success', text: res.summary || '连接成功并已保存' };
     void host.toast({ kind: 'success', message: res.summary || '配置已保存' });
-    await loadState(true);
+    await loadState(true, false);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     settingsFeedback = { tone: 'error', text: msg };
     void host.toast({ kind: 'error', message: msg });
   } finally {
     saving = false;
-    render();
-  }
-};
-
-const renderAgCard = (snapshot: BoardSnapshot): HTMLElement => {
-  const card = el('div', 'pq-card');
-  const ag = snapshot.antigravity;
-
-  const head = el('div', 'pq-card-head');
-  head.appendChild(el('h4', 'pq-card-title', 'Antigravity 号池'));
-  const badgeWrap = el('div');
-  track(mountBadge(badgeWrap, {
-    label: ag.online ? `${ag.summary?.active_accounts ?? ag.accounts.length} 号在线` : '离线',
-    tone: ag.online ? 'success' : 'error',
-  }));
-  head.appendChild(badgeWrap);
-  card.appendChild(head);
-
-  const primary = ag.accounts[0];
-  if (!ag.online || !primary) {
-    card.appendChild(el('div', 'pq-muted', ag.status_message || '暂无活跃 Antigravity 账号数据'));
-    return card;
-  }
-
-  const list = el('div', 'pq-win-list');
-  const sorted = [...(primary.windows ?? [])].sort((a: AntigravityWindow, b: AntigravityWindow) => {
-    const ia = WINDOW_ORDER.indexOf(a.key);
-    const ib = WINDOW_ORDER.indexOf(b.key);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
-
-  for (const win of sorted) {
-    const rem = clampPercent(win.remaining_percent);
-    const tone = toneForRemaining(rem);
-    const row = el('div', 'pq-win');
-
-    const top = el('div', 'pq-win-top');
-    top.appendChild(el('span', 'pq-win-name', win.label || win.key));
-    top.appendChild(el('span', `pq-win-val pq-text-${tone}`, `剩 ${formatPercent(rem)}`));
-    row.appendChild(top);
-
-    const trackBar = el('div', 'pq-bar-track');
-    const fill = el('div', `pq-bar-fill pq-tone-${tone}`);
-    fill.style.width = `${rem}%`;
-    trackBar.appendChild(fill);
-    row.appendChild(trackBar);
-
-    const sub = el('div', 'pq-win-sub');
-    const costText = win.has_current_usage && win.current_cost > 0
-      ? (win.has_forecast && win.forecast_cost > 0
-        ? `已用 ${formatUsd(win.current_cost)} · 满额预测 ${formatUsd(win.forecast_cost)}`
-        : `已用 ${formatUsd(win.current_cost)}`)
-      : '本轮暂无消耗';
-    sub.appendChild(el('span', 'pq-mono', costText));
-    if (win.reset_at_ms > 0) {
-      sub.appendChild(el('span', 'pq-mono', `重置 ${formatCountdown(win.reset_at_ms)}`));
+    if (settingsCardEl) {
+      renderSettingsCardContent(settingsCardEl);
+    } else {
+      render();
     }
-    row.appendChild(sub);
-    list.appendChild(row);
   }
-  card.appendChild(list);
-
-  // Trend chart section
-  const chartBox = el('div', 'pq-chart-box');
-  const chartHead = el('div', 'pq-chart-head');
-  chartHead.appendChild(el('span', 'pq-muted', '周期剩余趋势'));
-  const tabsRoot = el('div');
-  track(mountTabs(tabsRoot, {
-    items: [
-      { id: '5h', label: '5h / 24h' },
-      { id: '7d', label: '7d 周期' },
-    ],
-    activeId: historyWindow,
-    onChange: (next) => {
-      if (next !== '5h' && next !== '7d') return;
-      historyWindow = next;
-      void loadState(false);
-    },
-  }));
-  chartHead.appendChild(tabsRoot);
-  chartBox.appendChild(chartHead);
-
-  if (currentState?.history) {
-    chartBox.appendChild(buildHistorySvg(currentState.history));
-  } else {
-    chartBox.appendChild(el('div', 'pq-muted', '暂无历史趋势数据'));
-  }
-  card.appendChild(chartBox);
-
-  return card;
 };
 
-const renderAisCard = (snapshot: BoardSnapshot): HTMLElement => {
-  const card = el('div', 'pq-card');
-  const ais = snapshot.aistudio;
-
-  const head = el('div', 'pq-card-head');
-  head.appendChild(el('h4', 'pq-card-title', 'AIStudio2API 号池'));
-  const badgeWrap = el('div');
-  const ready = ais.account_counts?.ready ?? 0;
-  const enabled = ais.account_counts?.enabled ?? 0;
-  track(mountBadge(badgeWrap, {
-    label: ais.online ? `${ready}/${enabled} 号就绪` : '离线',
-    tone: ais.online ? (ready === enabled ? 'success' : 'warning') : 'error',
-  }));
-  head.appendChild(badgeWrap);
-  card.appendChild(head);
-
-  if (!ais.online) {
-    card.appendChild(el('div', 'pq-muted', ais.status_message || 'AIStudio2API 当前离线'));
-    return card;
-  }
-
-  const meta = el('div', 'pq-win-sub');
-  const pg = ais.playground;
-  meta.appendChild(el('span', 'pq-mono', `Playground ${pg?.requests ?? 0}次`));
-  if (ais.next_reset_ms > 0) {
-    meta.appendChild(el('span', 'pq-mono', `16:00 重置 · ${formatCountdown(ais.next_reset_ms)}`));
-  }
-  card.appendChild(meta);
-
-  const list = el('div', 'pq-model-list');
-  for (const model of ais.models ?? []) {
-    const rem = clampPercent(model.effective_percent);
-    const tone = model.available_accounts === 0 ? 'error' : toneForRemaining(rem);
-    const row = el('div', 'pq-model-row');
-
-    const top = el('div', 'pq-model-top');
-    top.appendChild(el('span', 'pq-model-name', model.label || model.id));
-    const right = el('div', 'pq-actions');
-    if (model.eligible_accounts > 0 && rem < 99.5) {
-      right.appendChild(el('span', 'pq-pill', isBottleneckTokens(model) ? 'Token瓶颈' : '次数瓶颈'));
-    }
-    right.appendChild(el('span', `pq-win-val pq-text-${tone}`, `${formatPercent(rem)}`));
-    top.appendChild(right);
-    row.appendChild(top);
-
-    const bar = el('div', 'pq-bar-track');
-    const fill = el('div', `pq-bar-fill pq-tone-${tone}`);
-    fill.style.width = `${rem}%`;
-    bar.appendChild(fill);
-    row.appendChild(bar);
-
-    const sub = el('div', 'pq-win-sub');
-    sub.appendChild(el('span', 'pq-mono', `可用 ${model.available_accounts}/${model.eligible_accounts} 号`));
-    sub.appendChild(el('span', 'pq-mono', `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)}`));
-    row.appendChild(sub);
-
-    list.appendChild(row);
-  }
-  card.appendChild(list);
-  return card;
-};
-
-const renderSettingsCard = (): HTMLElement => {
-  const card = el('div', 'pq-card');
-  const hasPasscode = currentState?.config.hasPasscode === true;
-
-  const toggleBtn = el('button', 'pq-settings-toggle');
-  toggleBtn.type = 'button';
-  toggleBtn.appendChild(el('span', 'pq-card-title', '连接设置（看板地址与口令）'));
-  toggleBtn.appendChild(el('span', 'pq-muted', settingsExpanded ? '收起 ▲' : '展开 ▼'));
-  toggleBtn.addEventListener('click', () => {
-    settingsExpanded = !settingsExpanded;
-    render();
-  });
-  card.appendChild(toggleBtn);
-
-  if (!settingsExpanded) {
-    card.appendChild(el('div', 'pq-muted pq-mono', `${currentState?.config.url ?? draftUrl} · ${hasPasscode ? '已保存口令' : '无口令'}`));
-    return card;
-  }
-
-  const body = el('div', 'pq-settings-body');
-
-  const urlRoot = el('div');
-  const urlField = track(mountTextField(urlRoot, {
-    label: '看板地址 URL',
-    value: draftUrl,
-    placeholder: 'http://127.0.0.1:18380 或 https://your-board.example.com',
-    mono: true,
-    onChange: (value) => {
-      draftUrl = value;
-      draftDirty = true;
-      urlField.update({ value });
-    },
-  }));
-  body.appendChild(urlRoot);
-
-  const passRoot = el('div');
-  const passField = track(mountTextField(passRoot, {
-    label: '访问口令 (X-View-Passcode)',
-    value: draftPasscode,
-    password: true,
-    placeholder: hasPasscode ? '已保存口令（留空保存将保持原口令不变）' : '若看板未设口令可留空',
-    helper: '仅写入本机 0600 配置文件，不会回显给前端或暴露给对话上下文。',
-    onChange: (value) => {
-      draftPasscode = value;
-      passField.update({ value });
-    },
-  }));
-  body.appendChild(passRoot);
-
-  if (settingsFeedback) {
-    const fbRoot = el('div');
-    track(mountBanner(fbRoot, {
-      tone: settingsFeedback.tone,
-      title: settingsFeedback.text,
-    }));
-    body.appendChild(fbRoot);
-  }
-
-  const actions = el('div', 'pq-settings-actions');
-  const saveRoot = el('div');
-  track(mountButton(saveRoot, {
-    label: saving ? '测试中...' : '测试并保存',
-    size: 'sm',
-    loading: saving,
-    disabled: saving,
-    onClick: () => void testAndSaveSettings(false),
-  }));
-  actions.appendChild(saveRoot);
-
-  if (hasPasscode) {
-    const clearRoot = el('div');
-    track(mountButton(clearRoot, {
-      label: '清空口令',
-      variant: 'outline',
-      size: 'sm',
-      disabled: saving,
-      onClick: () => void testAndSaveSettings(true),
-    }));
-    actions.appendChild(clearRoot);
-  }
-
-  body.appendChild(actions);
-  card.appendChild(body);
-  return card;
-};
+// ---------- Main Atomic Render (Zero Scroll Jump) ----------
 
 const render = (): void => {
-  disposeUi();
-  root.innerHTML = '';
+  const savedScroll = captureScroll();
+  if (savedScroll.prevHeight > 0) {
+    root.style.minHeight = `${Math.ceil(savedScroll.prevHeight)}px`;
+  }
+
+  const nextDisposers: Array<() => void> = [];
+  const nextClearers = new Set<() => void>();
+  const oldClearers = activeChartClearers;
+  activeChartClearers = nextClearers;
+  activeScrubCount = 0;
 
   const wrap = el('div', 'pq-wrap');
+  const showAis = currentState?.config.showAis ?? true;
 
-  // Header
+  // Compact Top Header Bar (golden first screen immediately below!)
   const header = el('div', 'pq-header');
-  const titleRow = el('div', 'pq-title-row');
-  titleRow.appendChild(el('h3', 'pq-title', 'Pool Quota'));
+  const brand = el('div', 'pq-brand');
+  brand.appendChild(el('h3', 'pq-title', 'Pool Quota'));
+
   if (loading && !currentState) {
     const spinRoot = el('div');
-    track(mountSpinner(spinRoot, { size: 'sm' }));
-    titleRow.appendChild(spinRoot);
+    const spin = mountSpinner(spinRoot, { size: 'sm' });
+    nextDisposers.push(() => spin.dispose());
+    brand.appendChild(spinRoot);
+  } else if (currentState?.snapshot) {
+    const dots = el('div', 'pq-pool-dots');
+    const ag = currentState.snapshot.antigravity;
+    const ais = currentState.snapshot.aistudio;
+
+    const agCls = !ag.online ? 'is-err' : ag.status === 'degraded' ? 'is-warn' : 'is-ok';
+    const agChip = el('span', `pq-dot-chip ${agCls}`);
+    agChip.appendChild(el('span', 'pq-dot'));
+    agChip.appendChild(document.createTextNode('AG'));
+    dots.appendChild(agChip);
+
+    if (showAis) {
+      const aisReady = ais.account_counts?.ready ?? 0;
+      const aisEnabled = ais.account_counts?.enabled ?? 0;
+      const aisCls = !ais.online ? 'is-err' : aisReady < aisEnabled ? 'is-warn' : 'is-ok';
+      const aisChip = el('span', `pq-dot-chip ${aisCls}`);
+      aisChip.appendChild(el('span', 'pq-dot'));
+      aisChip.appendChild(document.createTextNode('AIS'));
+      dots.appendChild(aisChip);
+    }
+    brand.appendChild(dots);
   }
-  header.appendChild(titleRow);
+  header.appendChild(brand);
 
   const actions = el('div', 'pq-actions');
   const refreshRoot = el('div');
-  track(mountButton(refreshRoot, {
+  const nextRefreshBtn = mountButton(refreshRoot, {
     label: '刷新',
     variant: 'outline',
     size: 'xs',
     loading,
-    onClick: () => void loadState(true),
-  }));
+    onClick: () => void loadState(true, false),
+  });
+  nextDisposers.push(() => nextRefreshBtn.dispose());
   actions.appendChild(refreshRoot);
 
   if (currentState?.config.url) {
     const openRoot = el('div');
-    track(mountButton(openRoot, {
-      label: '打开看板',
+    const openBtn = mountButton(openRoot, {
+      label: '看板',
       variant: 'ghost',
       size: 'xs',
       onClick: () => {
@@ -818,72 +2829,105 @@ const render = (): void => {
           void host.openUrl(currentState.config.url);
         }
       },
-    }));
+    });
+    nextDisposers.push(() => openBtn.dispose());
     actions.appendChild(openRoot);
   }
+
+  const nextGearBtn = el('button', 'pq-icon-btn');
+  nextGearBtn.type = 'button';
+  nextGearBtn.title = '连接与显示设置';
+  nextGearBtn.setAttribute('aria-label', '连接与显示设置');
+  nextGearBtn.setAttribute('aria-expanded', String(settingsExpanded));
+  nextGearBtn.appendChild(createGearIcon());
+  nextGearBtn.addEventListener('click', () => {
+    settingsExpanded = !settingsExpanded;
+    syncGearButtonState();
+    if (settingsCardEl) {
+      renderSettingsCardContent(settingsCardEl);
+      if (settingsExpanded) {
+        requestAnimationFrame(() => {
+          settingsCardEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+      }
+    }
+  });
+  actions.appendChild(nextGearBtn);
+
   header.appendChild(actions);
   wrap.appendChild(header);
 
-  // Quick switches card
-  const toggleCard = el('div', 'pq-card');
-  const switchRoot = el('div');
-  const showAis = currentState?.config.showAis ?? true;
-  track(mountSwitch(switchRoot, {
-    label: '显示 AIStudio 号池',
-    description: '同时控制顶栏/Usage 总卡、Work Status 与本面板是否展示 AIS 模型余量',
-    checked: showAis,
-    onChange: (checked) => void toggleShowAis(checked),
-  }));
-  toggleCard.appendChild(switchRoot);
-
-  const compactRoot = el('div');
-  const compactQuota = currentState?.config.compactQuota ?? true;
-  track(mountSwitch(compactRoot, {
-    label: '紧凑配额文案（适配手机端）',
-    description: '精简手机端浮层与 Usage 总卡文案避免窄屏叠字；本面板与 Work Status 始终保留完整费用与次数/Token',
-    checked: compactQuota,
-    onChange: (checked) => void toggleCompactQuota(checked),
-  }));
-  toggleCard.appendChild(compactRoot);
-  wrap.appendChild(toggleCard);
-
-  // Error banner
+  // Error banner (when needed)
   if (currentState?.error) {
     const errRoot = el('div');
-    track(mountBanner(errRoot, {
+    const errBanner = mountBanner(errRoot, {
       tone: currentState.errorCode === 'unauthorized' ? 'warning' : 'error',
       title: currentState.errorCode === 'unauthorized' ? '需要访问口令' : '看板连接异常',
       body: currentState.error,
-    }));
+    });
+    nextDisposers.push(() => errBanner.dispose());
     wrap.appendChild(errRoot);
   }
 
-  // Main pools
+  // Primary Quota Pool Cards — First-screen center stage!
   if (currentState?.snapshot) {
-    wrap.appendChild(renderAgCard(currentState.snapshot));
+    wrap.appendChild(renderAgCard(currentState.snapshot, nextDisposers));
+
     if (showAis) {
-      wrap.appendChild(renderAisCard(currentState.snapshot));
+      wrap.appendChild(renderAisCard(currentState.snapshot, nextDisposers));
     }
   } else if (!loading && !currentState?.error) {
     const emptyRoot = el('div');
-    track(mountEmpty(emptyRoot, {
+    const emptyHandle = mountEmpty(emptyRoot, {
       title: '尚未读取到号池数据',
-      body: '请在下方连接设置中填写看板地址与访问口令后点击测试并保存。',
-      action: { label: '重试', onClick: () => void loadState(true) },
-    }));
+      body: '请在下方「连接与显示设置」中填写看板地址与访问口令后点击测试并保存。',
+      action: { label: '重试', onClick: () => void loadState(true, false) },
+    });
+    nextDisposers.push(() => emptyHandle.dispose());
     wrap.appendChild(emptyRoot);
   }
 
-  // Settings card
-  wrap.appendChild(renderSettingsCard());
+  // Bottom Collapsible Settings Card (holds low-frequency display switches + URL/Passcode)
+  const nextSettingsCard = el('div', 'pq-card');
+  wrap.appendChild(nextSettingsCard);
 
   if (currentState?.fetchedAtMs) {
     const t = new Date(currentState.fetchedAtMs).toLocaleTimeString();
-    wrap.appendChild(el('div', 'pq-footer-note pq-mono', `上次更新：${t} · 原生总卡在 Settings → Usage 中可勾选置顶到顶栏`));
+    const footer = el('div', 'pq-footer-note pq-mono');
+    footer.appendChild(el('span', '', `更新于 ${t}`));
+    footer.appendChild(el('span', '', 'Settings → Usage 可置顶总卡'));
+    wrap.appendChild(footer);
   }
 
-  root.appendChild(wrap);
+  // Dispose previous handles & swap DOM atomically without zero-height collapse
+  const prevDisposers = activeDisposers;
+  activeDisposers = nextDisposers;
+  refreshBtnHandle = nextRefreshBtn;
+  gearBtnEl = nextGearBtn;
+  settingsCardEl = nextSettingsCard;
+
+  disposeList(prevDisposers);
+  oldClearers.clear();
+  renderSettingsCardContent(nextSettingsCard);
+  root.replaceChildren(wrap);
+
+  restoreScroll(savedScroll);
 };
+
+// ---------- Silent Visibility-Aware Auto-Refresh ----------
+
+const startSilentAutoRefresh = (): void => {
+  if (autoRefreshTimer !== null) return;
+  autoRefreshTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (loading || saving || draftDirty || activeScrubCount > 0) return;
+    const activeTag = document.activeElement?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
+    void loadState(false, true);
+  }, AUTO_REFRESH_MS);
+};
+
+// ---------- Bootstrap ----------
 
 injectStyles();
 host.onReady((ctx) => {
@@ -891,5 +2935,7 @@ host.onReady((ctx) => {
   if (mounted) return;
   mounted = true;
   render();
-  void loadState(false);
+  void loadUiPrefs();
+  void loadState(false, false);
+  startSilentAutoRefresh();
 });

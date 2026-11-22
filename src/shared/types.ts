@@ -38,12 +38,47 @@ export interface AntigravityTrendSeries {
   points: Array<{ t: number; r: number }>;
 }
 
+export interface AntigravityRecentBucket {
+  time?: string;
+  success: number;
+  failed: number;
+}
+
+export interface AntigravityRecentBar {
+  ok: boolean;
+  timestamp_ms?: number;
+  status_code?: number;
+}
+
+export interface AntigravityAccountHistory {
+  available: boolean;
+  status_note?: string;
+  total_requests: number;
+  success_calls: number;
+  failure_calls: number;
+  total_tokens: number;
+  total_cost: number;
+  success_rate: number | null;
+  latest_request_at_ms?: number;
+  has_recent_buckets: boolean;
+  recent_window_minutes: number;
+  recent_window_success: number;
+  recent_window_failure: number;
+  recent_window_rate: number | null;
+  recent_buckets?: AntigravityRecentBucket[];
+  recent_success_count: number;
+  recent_failure_count: number;
+  recent_success_rate: number | null;
+  recent_bars?: AntigravityRecentBar[];
+}
+
 export interface AntigravityAccount {
   id: string;
   code_name: string;
   tier: string;
   status: string;
   status_label: string;
+  history?: AntigravityAccountHistory;
   windows: AntigravityWindow[];
   has_history: boolean;
   trend_24h?: AntigravityTrendSeries[];
