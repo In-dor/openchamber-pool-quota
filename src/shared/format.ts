@@ -62,12 +62,40 @@ export const formatAgWindowValueLabel = (win: AntigravityWindow): string => {
   return `剩 ${rem}`;
 };
 
+export const formatAgWindowCompactValueLabel = (win: AntigravityWindow): string | null => {
+  if (win.has_current_usage && win.current_cost > 0) {
+    const rem = formatPercent(win.remaining_percent);
+    if (win.has_forecast && win.forecast_cost > 0) {
+      return `${rem} · ${formatUsd(win.current_cost)}/${formatUsd(win.forecast_cost)}`;
+    }
+    return `${rem} · ${formatUsd(win.current_cost)}`;
+  }
+  // Omit valueLabel when there is no cost so OpenChamber natively renders the short percentage
+  // and automatically respects the user's remaining/used display mode.
+  return null;
+};
+
 export const formatAisModelValueLabel = (model: AIStudioModelSummary): string => {
   const acct = `${model.available_accounts}/${model.eligible_accounts}号`;
   const remReq = `${model.effective_remaining_requests}次`;
   const remTok = formatTokens(model.effective_remaining_tokens);
   const pct = formatPercent(model.effective_percent);
   return `${acct} · ${pct} · 剩${remReq}/${remTok}`;
+};
+
+export const formatAisModelCompactValueLabel = (model: AIStudioModelSummary): string | null => {
+  if (model.eligible_accounts <= 0) {
+    return '0/0号';
+  }
+  if (model.available_accounts <= 0) {
+    return `0/${model.eligible_accounts}号 · 耗尽`;
+  }
+  if (model.available_accounts < model.eligible_accounts) {
+    return `${model.available_accounts}/${model.eligible_accounts}号 · ${formatPercent(model.effective_percent)}`;
+  }
+  // All eligible accounts are available: omit valueLabel so OpenChamber natively renders
+  // the concise percentage (e.g. "97%"), keeping narrow mobile rows completely overlap-free.
+  return null;
 };
 
 export const isBottleneckTokens = (model: AIStudioModelSummary): boolean => {

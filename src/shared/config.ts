@@ -9,6 +9,7 @@ export const DEFAULT_CONFIG: PoolQuotaConfig = {
   url: DEFAULT_BOARD_URL,
   passcode: '',
   showAis: true,
+  compactQuota: true,
 };
 
 export const normalizeBoardUrl = (raw: string): string => {
@@ -38,6 +39,7 @@ type RawConfigFile = Partial<{
   url: unknown;
   passcode: unknown;
   showAis: unknown;
+  compactQuota: unknown;
 }>;
 
 const readJsonFileSafe = (filePath: string): { data: RawConfigFile; mtimeMs: number } | null => {
@@ -86,6 +88,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): PoolQuotaConfi
   let url = DEFAULT_CONFIG.url;
   let passcode = DEFAULT_CONFIG.passcode;
   let showAis = DEFAULT_CONFIG.showAis;
+  let compactQuota = DEFAULT_CONFIG.compactQuota;
 
   for (const item of ordered) {
     if (typeof item.url === 'string' && item.url.trim()) {
@@ -101,6 +104,10 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): PoolQuotaConfi
     const boolVal = parseBool(item.showAis);
     if (boolVal !== undefined) {
       showAis = boolVal;
+    }
+    const compactVal = parseBool(item.compactQuota);
+    if (compactVal !== undefined) {
+      compactQuota = compactVal;
     }
   }
 
@@ -119,8 +126,12 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): PoolQuotaConfi
   if (envShowAis !== undefined) {
     showAis = envShowAis;
   }
+  const envCompact = parseBool(env.POOL_QUOTA_COMPACT);
+  if (envCompact !== undefined) {
+    compactQuota = envCompact;
+  }
 
-  return { url, passcode, showAis };
+  return { url, passcode, showAis, compactQuota };
 };
 
 const writeFileSecure = (filePath: string, content: string): void => {
@@ -133,7 +144,7 @@ const writeFileSecure = (filePath: string, content: string): void => {
 };
 
 export const saveConfig = (
-  patch: Partial<{ url: string; passcode: string; showAis: boolean; clearPasscode: boolean }>,
+  patch: Partial<{ url: string; passcode: string; showAis: boolean; compactQuota: boolean; clearPasscode: boolean }>,
   env: NodeJS.ProcessEnv = process.env,
 ): PoolQuotaConfig => {
   const current = loadConfig(env);
@@ -145,11 +156,13 @@ export const saveConfig = (
     nextPasscode = patch.passcode;
   }
   const nextShowAis = typeof patch.showAis === 'boolean' ? patch.showAis : current.showAis;
+  const nextCompactQuota = typeof patch.compactQuota === 'boolean' ? patch.compactQuota : current.compactQuota;
 
   const next: PoolQuotaConfig = {
     url: nextUrl,
     passcode: nextPasscode,
     showAis: nextShowAis,
+    compactQuota: nextCompactQuota,
   };
   const payload = `${JSON.stringify(next, null, 2)}\n`;
 
@@ -177,4 +190,5 @@ export const toPublicConfig = (cfg: PoolQuotaConfig): PublicPoolQuotaConfig => (
   url: cfg.url,
   hasPasscode: cfg.passcode.length > 0,
   showAis: cfg.showAis,
+  compactQuota: cfg.compactQuota,
 });

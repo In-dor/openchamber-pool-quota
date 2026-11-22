@@ -14,6 +14,7 @@ type PoolConfig = {
   url: string;
   passcode: string;
   showAis: boolean;
+  compactQuota: boolean;
 };
 
 type AgWindow = {
@@ -112,6 +113,7 @@ function loadConfig(storedPrefs?: { url?: string; showAis?: boolean }, pluginOpt
   let url = storedPrefs?.url?.trim() || DEFAULT_URL;
   let passcode = "";
   let showAis = typeof storedPrefs?.showAis === "boolean" ? storedPrefs.showAis : true;
+  let compactQuota = true;
 
   for (const item of files) {
     if (typeof item.data.url === "string" && item.data.url.trim()) {
@@ -126,6 +128,8 @@ function loadConfig(storedPrefs?: { url?: string; showAis?: boolean }, pluginOpt
     }
     const b = parseBool(item.data.showAis);
     if (b !== undefined) showAis = b;
+    const cb = parseBool(item.data.compactQuota);
+    if (cb !== undefined) compactQuota = cb;
   }
 
   if (pluginOptions) {
@@ -141,6 +145,8 @@ function loadConfig(storedPrefs?: { url?: string; showAis?: boolean }, pluginOpt
     }
     const ob = parseBool(pluginOptions.showAis);
     if (ob !== undefined) showAis = ob;
+    const ocb = parseBool(pluginOptions.compactQuota);
+    if (ocb !== undefined) compactQuota = ocb;
   }
 
   if (typeof process.env.POOL_QUOTA_URL === "string" && process.env.POOL_QUOTA_URL.trim()) {
@@ -155,8 +161,10 @@ function loadConfig(storedPrefs?: { url?: string; showAis?: boolean }, pluginOpt
   }
   const eb = parseBool(process.env.POOL_QUOTA_SHOW_AIS);
   if (eb !== undefined) showAis = eb;
+  const ecb = parseBool(process.env.POOL_QUOTA_COMPACT);
+  if (ecb !== undefined) compactQuota = ecb;
 
-  return { url, passcode, showAis };
+  return { url, passcode, showAis, compactQuota };
 }
 
 function writeSecureFile(filePath: string, content: string): void {
@@ -418,7 +426,12 @@ export default Plugin.define({
 
       const trimmedPass = passAnswer.trim();
       const nextPasscode = trimmedPass === "-" ? "" : (trimmedPass ? trimmedPass : cur.passcode);
-      const candidate: PoolConfig = { url: nextUrl, passcode: nextPasscode, showAis: cur.showAis };
+      const candidate: PoolConfig = {
+        url: nextUrl,
+        passcode: nextPasscode,
+        showAis: cur.showAis,
+        compactQuota: cur.compactQuota,
+      };
 
       const check = await fetchBoardSnapshot(candidate, 8000);
       if (!check.ok) {

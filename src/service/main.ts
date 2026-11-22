@@ -195,7 +195,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
 
   if (pathname === '/panel/config' && method === 'POST') {
     const body = parseJsonObject(await readBody(req));
-    const patch: Partial<{ url: string; passcode: string; showAis: boolean; clearPasscode: boolean }> = {};
+    const patch: Partial<{ url: string; passcode: string; showAis: boolean; compactQuota: boolean; clearPasscode: boolean }> = {};
     if (typeof body.url === 'string') {
       patch.url = normalizeBoardUrl(body.url);
     }
@@ -207,6 +207,9 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     }
     if (typeof body.showAis === 'boolean') {
       patch.showAis = body.showAis;
+    }
+    if (typeof body.compactQuota === 'boolean') {
+      patch.compactQuota = body.compactQuota;
     }
     const nextCfg = saveConfig(patch);
     clearBoardCache();
@@ -226,11 +229,13 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       ? ''
       : (typeof body.passcode === 'string' && body.passcode.length > 0 ? body.passcode : current.passcode);
     const testShowAis = typeof body.showAis === 'boolean' ? body.showAis : current.showAis;
+    const testCompactQuota = typeof body.compactQuota === 'boolean' ? body.compactQuota : current.compactQuota;
 
     const candidate: PoolQuotaConfig = {
       url: testUrl,
       passcode: testPasscode,
       showAis: testShowAis,
+      compactQuota: testCompactQuota,
     };
 
     const snapRes = await fetchBoardSnapshot(candidate, { force: true, timeoutMs: 8_000 });
@@ -249,6 +254,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
         passcode: candidate.passcode,
         clearPasscode,
         showAis: candidate.showAis,
+        compactQuota: candidate.compactQuota,
       });
       clearBoardCache();
     }

@@ -206,7 +206,8 @@ var DEFAULT_BOARD_URL = "http://127.0.0.1:18380";
 var DEFAULT_CONFIG = {
   url: DEFAULT_BOARD_URL,
   passcode: "",
-  showAis: true
+  showAis: true,
+  compactQuota: true
 };
 var normalizeBoardUrl = (raw) => {
   const trimmed = raw.trim();
@@ -272,6 +273,7 @@ var loadConfig = (env = process.env) => {
   let url = DEFAULT_CONFIG.url;
   let passcode = DEFAULT_CONFIG.passcode;
   let showAis = DEFAULT_CONFIG.showAis;
+  let compactQuota = DEFAULT_CONFIG.compactQuota;
   for (const item of ordered) {
     if (typeof item.url === "string" && item.url.trim()) {
       try {
@@ -284,6 +286,10 @@ var loadConfig = (env = process.env) => {
     const boolVal = parseBool(item.showAis);
     if (boolVal !== undefined) {
       showAis = boolVal;
+    }
+    const compactVal = parseBool(item.compactQuota);
+    if (compactVal !== undefined) {
+      compactQuota = compactVal;
     }
   }
   if (typeof env.POOL_QUOTA_URL === "string" && env.POOL_QUOTA_URL.trim()) {
@@ -298,7 +304,11 @@ var loadConfig = (env = process.env) => {
   if (envShowAis !== undefined) {
     showAis = envShowAis;
   }
-  return { url, passcode, showAis };
+  const envCompact = parseBool(env.POOL_QUOTA_COMPACT);
+  if (envCompact !== undefined) {
+    compactQuota = envCompact;
+  }
+  return { url, passcode, showAis, compactQuota };
 };
 var writeFileSecure = (filePath, content) => {
   const dir = path.dirname(filePath);
@@ -318,10 +328,12 @@ var saveConfig = (patch, env = process.env) => {
     nextPasscode = patch.passcode;
   }
   const nextShowAis = typeof patch.showAis === "boolean" ? patch.showAis : current.showAis;
+  const nextCompactQuota = typeof patch.compactQuota === "boolean" ? patch.compactQuota : current.compactQuota;
   const next = {
     url: nextUrl,
     passcode: nextPasscode,
-    showAis: nextShowAis
+    showAis: nextShowAis,
+    compactQuota: nextCompactQuota
   };
   const payload = `${JSON.stringify(next, null, 2)}
 `;
@@ -347,7 +359,8 @@ var saveConfig = (patch, env = process.env) => {
 var toPublicConfig = (cfg) => ({
   url: cfg.url,
   hasPasscode: cfg.passcode.length > 0,
-  showAis: cfg.showAis
+  showAis: cfg.showAis,
+  compactQuota: cfg.compactQuota
 });
 
 // src/service/client.ts
@@ -564,12 +577,34 @@ var formatAgWindowValueLabel = (win) => {
   }
   return `剩 ${rem}`;
 };
+var formatAgWindowCompactValueLabel = (win) => {
+  if (win.has_current_usage && win.current_cost > 0) {
+    const rem = formatPercent(win.remaining_percent);
+    if (win.has_forecast && win.forecast_cost > 0) {
+      return `${rem} · ${formatUsd(win.current_cost)}/${formatUsd(win.forecast_cost)}`;
+    }
+    return `${rem} · ${formatUsd(win.current_cost)}`;
+  }
+  return null;
+};
 var formatAisModelValueLabel = (model) => {
   const acct = `${model.available_accounts}/${model.eligible_accounts}号`;
   const remReq = `${model.effective_remaining_requests}次`;
   const remTok = formatTokens(model.effective_remaining_tokens);
   const pct = formatPercent(model.effective_percent);
   return `${acct} · ${pct} · 剩${remReq}/${remTok}`;
+};
+var formatAisModelCompactValueLabel = (model) => {
+  if (model.eligible_accounts <= 0) {
+    return "0/0号";
+  }
+  if (model.available_accounts <= 0) {
+    return `0/${model.eligible_accounts}号 · 耗尽`;
+  }
+  if (model.available_accounts < model.eligible_accounts) {
+    return `${model.available_accounts}/${model.eligible_accounts}号 · ${formatPercent(model.effective_percent)}`;
+  }
+  return null;
 };
 var truncate = (value, max) => value.length <= max ? value : `${value.slice(0, Math.max(1, max - 1))}…`;
 
@@ -594,12 +629,13 @@ var sortAgWindows = (windows) => [...windows].sort((a, b) => {
     return 1;
   return a.label.localeCompare(b.label);
 });
-var toAgQuotaWindow = (win) => {
+var toAgQuotaWindow = (win, compact) => {
   const remaining = clampPercent(win.remaining_percent);
   const used = round1(clampPercent(100 - remaining));
+  const rawLabel = compact ? formatAgWindowCompactValueLabel(win) : formatAgWindowValueLabel(win);
   const out = {
     usedPercent: used,
-    valueLabel: safeLabel(formatAgWindowValueLabel(win))
+    ...rawLabel ? { valueLabel: safeLabel(rawLabel) } : {}
   };
   if (Number.isFinite(win.duration_seconds) && win.duration_seconds > 0) {
     out.windowSeconds = Math.round(win.duration_seconds);
@@ -624,11 +660,12 @@ var buildQuotaUsageData = (snapshot, cfg) => {
       return;
     windows[safeKey(name)] = win;
   };
+  const compact = cfg.compactQuota;
   if (ag?.online && Array.isArray(ag.accounts) && ag.accounts.length > 0) {
     if (ag.accounts.length === 1) {
       const only = ag.accounts[0];
       for (const win of sortAgWindows(only.windows ?? [])) {
-        pushWindow(win.label || win.key, toAgQuotaWindow(win));
+        pushWindow(win.label || win.key, toAgQuotaWindow(win, compact));
       }
     } else {
       for (const avg of ag.summary?.window_averages ?? []) {
@@ -649,7 +686,7 @@ var buildQuotaUsageData = (snapshot, cfg) => {
         }
         const entry = {
           usedPercent: used,
-          valueLabel: safeLabel(`均剩 ${formatPercent(remaining)} (${avg.account_count}号)`)
+          valueLabel: safeLabel(compact ? `${formatPercent(remaining)} · ${avg.account_count}号` : `均剩 ${formatPercent(remaining)} (${avg.account_count}号)`)
         };
         if (durationSeconds !== null)
           entry.windowSeconds = durationSeconds;
@@ -661,7 +698,7 @@ var buildQuotaUsageData = (snapshot, cfg) => {
         for (const win of sortAgWindows(acct.windows ?? [])) {
           if (Object.keys(windows).length >= QUOTA_PROVIDER_WINDOWS_MAX - (cfg.showAis ? 1 : 0))
             break;
-          pushWindow(`${acct.code_name} · ${win.label || win.key}`, toAgQuotaWindow(win));
+          pushWindow(`${acct.code_name} · ${win.label || win.key}`, toAgQuotaWindow(win, compact));
         }
       }
     }
@@ -680,7 +717,7 @@ var buildQuotaUsageData = (snapshot, cfg) => {
       const zeroCount = activeModels.filter((m) => m.available_accounts === 0).length;
       const ready = ais.account_counts?.ready ?? 0;
       const enabled = ais.account_counts?.enabled ?? 0;
-      const summaryLabel = zeroCount > 0 ? `${ready}/${enabled}号 · ${zeroCount}模型耗尽 · 最低${formatPercent(minPct)}` : `${ready}/${enabled}号就绪 · 最低 ${formatPercent(minPct)}`;
+      const summaryLabel = compact ? zeroCount > 0 ? `${ready}/${enabled}号 · ${zeroCount}耗尽` : `${ready}/${enabled}号 · ${formatPercent(minPct)}` : zeroCount > 0 ? `${ready}/${enabled}号 · ${zeroCount}模型耗尽 · 最低${formatPercent(minPct)}` : `${ready}/${enabled}号就绪 · 最低 ${formatPercent(minPct)}`;
       const aisSummaryWin = {
         usedPercent: round1(clampPercent(100 - minPct)),
         windowSeconds: 86400,
@@ -689,15 +726,16 @@ var buildQuotaUsageData = (snapshot, cfg) => {
       if (Number.isFinite(ais.next_reset_ms) && ais.next_reset_ms > 0) {
         aisSummaryWin.resetAt = Math.round(ais.next_reset_ms);
       }
-      pushWindow("AIStudio 号池 (Playground)", aisSummaryWin);
+      pushWindow(compact ? "AIS 号池" : "AIStudio 号池 (Playground)", aisSummaryWin);
       if (aisModels.length > 0) {
         models = {};
         for (const model of aisModels.slice(0, QUOTA_PROVIDER_MODELS_MAX)) {
           const rem = clampPercent(model.effective_percent);
+          const rawModelLabel = compact ? formatAisModelCompactValueLabel(model) : formatAisModelValueLabel(model);
           const modelWin = {
             usedPercent: round1(clampPercent(100 - rem)),
             windowSeconds: 86400,
-            valueLabel: safeLabel(formatAisModelValueLabel(model))
+            ...rawModelLabel ? { valueLabel: safeLabel(rawModelLabel) } : {}
           };
           if (Number.isFinite(ais.next_reset_ms) && ais.next_reset_ms > 0) {
             modelWin.resetAt = Math.round(ais.next_reset_ms);
@@ -710,7 +748,7 @@ var buildQuotaUsageData = (snapshot, cfg) => {
         }
       }
     } else if (ais) {
-      pushWindow("AIStudio 号池", {
+      pushWindow(compact ? "AIS 号池" : "AIStudio 号池", {
         usedPercent: null,
         valueLabel: safeLabel(ais.status_message || "离线")
       });
@@ -1127,6 +1165,9 @@ var handleRequest = async (req, res) => {
     if (typeof body.showAis === "boolean") {
       patch.showAis = body.showAis;
     }
+    if (typeof body.compactQuota === "boolean") {
+      patch.compactQuota = body.compactQuota;
+    }
     const nextCfg = saveConfig(patch);
     clearBoardCache();
     const state = await buildPanelState(nextCfg, { force: true });
@@ -1140,10 +1181,12 @@ var handleRequest = async (req, res) => {
     const clearPasscode = body.clearPasscode === true;
     const testPasscode = clearPasscode ? "" : typeof body.passcode === "string" && body.passcode.length > 0 ? body.passcode : current.passcode;
     const testShowAis = typeof body.showAis === "boolean" ? body.showAis : current.showAis;
+    const testCompactQuota = typeof body.compactQuota === "boolean" ? body.compactQuota : current.compactQuota;
     const candidate = {
       url: testUrl,
       passcode: testPasscode,
-      showAis: testShowAis
+      showAis: testShowAis,
+      compactQuota: testCompactQuota
     };
     const snapRes = await fetchBoardSnapshot(candidate, { force: true, timeoutMs: 8000 });
     if (!snapRes.ok) {
@@ -1159,7 +1202,8 @@ var handleRequest = async (req, res) => {
         url: candidate.url,
         passcode: candidate.passcode,
         clearPasscode,
-        showAis: candidate.showAis
+        showAis: candidate.showAis,
+        compactQuota: candidate.compactQuota
       });
       clearBoardCache();
     }

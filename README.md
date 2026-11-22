@@ -4,7 +4,7 @@
 
 ## 功能亮点
 
-- **OpenChamber 一张原生总卡（`ext-pool-quota`）**：通过官方 `service.provides: ["quota"]` 接入，自动覆盖 **Settings → Usage 页面、顶部 Header 配额下拉栏、Work Status 区块、手机端（含小组件）与桌面端系统托盘**。
+- **OpenChamber 一张原生总卡（`ext-pool-quota`）**：通过官方 `service.provides: ["quota"]` 接入，自动覆盖 **Settings → Usage 页面、Work Status 用量区、手机端右上角浮层（含桌面小组件）与桌面端系统托盘**；默认开启「紧凑配额文案（适配手机端）」避免窄屏叠字，也可在侧边栏面板按需切回详版。
 - **可选开关显示 AIS 号池**：
   - **开启时**：总卡展示 Antigravity 4 窗口（剩余%、本轮已用 `$` / 满额预测 `$`、重置倒计时）+ AIStudio 汇总窗口 + 全部 10 个 AIStudio 模型分模型余量（可在 Usage 页按需勾选置顶模型）。
   - **关闭时**：总卡瞬间精简为纯 Antigravity 4 窗口视图。
@@ -61,11 +61,12 @@
 {
   "url": "http://127.0.0.1:18380",
   "passcode": "",
-  "showAis": true
+  "showAis": true,
+  "compactQuota": true
 }
 ```
 
-也支持通过环境变量临时覆盖：`POOL_QUOTA_URL`、`POOL_QUOTA_PASSCODE`、`POOL_QUOTA_SHOW_AIS`（`true`/`false`）。
+也支持通过环境变量临时覆盖：`POOL_QUOTA_URL`、`POOL_QUOTA_PASSCODE`、`POOL_QUOTA_SHOW_AIS`、`POOL_QUOTA_COMPACT`（`true`/`false`）。
 
 ## 本地开发与构建
 

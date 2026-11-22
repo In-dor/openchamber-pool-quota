@@ -9,7 +9,9 @@ import {
 } from '@openchamber/sdk';
 import {
   clampPercent,
+  formatAgWindowCompactValueLabel,
   formatAgWindowValueLabel,
+  formatAisModelCompactValueLabel,
   formatAisModelValueLabel,
   formatPercent,
   round1,
@@ -44,12 +46,15 @@ const sortAgWindows = (windows: AntigravityWindow[]): AntigravityWindow[] => (
   })
 );
 
-const toAgQuotaWindow = (win: AntigravityWindow): QuotaProviderWindow => {
+const toAgQuotaWindow = (win: AntigravityWindow, compact: boolean): QuotaProviderWindow => {
   const remaining = clampPercent(win.remaining_percent);
   const used = round1(clampPercent(100 - remaining));
+  const rawLabel = compact
+    ? formatAgWindowCompactValueLabel(win)
+    : formatAgWindowValueLabel(win);
   const out: QuotaProviderWindow = {
     usedPercent: used,
-    valueLabel: safeLabel(formatAgWindowValueLabel(win)),
+    ...(rawLabel ? { valueLabel: safeLabel(rawLabel) } : {}),
   };
   if (Number.isFinite(win.duration_seconds) && win.duration_seconds > 0) {
     out.windowSeconds = Math.round(win.duration_seconds);
@@ -80,11 +85,13 @@ export const buildQuotaUsageData = (
     windows[safeKey(name)] = win;
   };
 
+  const compact = cfg.compactQuota;
+
   if (ag?.online && Array.isArray(ag.accounts) && ag.accounts.length > 0) {
     if (ag.accounts.length === 1) {
       const only = ag.accounts[0]!;
       for (const win of sortAgWindows(only.windows ?? [])) {
-        pushWindow(win.label || win.key, toAgQuotaWindow(win));
+        pushWindow(win.label || win.key, toAgQuotaWindow(win, compact));
       }
     } else {
       // Multi-account pool: show pool averages first, then per-account windows if room permits.
@@ -106,7 +113,11 @@ export const buildQuotaUsageData = (
         }
         const entry: QuotaProviderWindow = {
           usedPercent: used,
-          valueLabel: safeLabel(`均剩 ${formatPercent(remaining)} (${avg.account_count}号)`),
+          valueLabel: safeLabel(
+            compact
+              ? `${formatPercent(remaining)} · ${avg.account_count}号`
+              : `均剩 ${formatPercent(remaining)} (${avg.account_count}号)`,
+          ),
         };
         if (durationSeconds !== null) entry.windowSeconds = durationSeconds;
         if (earliestReset !== null) entry.resetAt = earliestReset;
@@ -116,7 +127,7 @@ export const buildQuotaUsageData = (
       for (const acct of ag.accounts) {
         for (const win of sortAgWindows(acct.windows ?? [])) {
           if (Object.keys(windows).length >= QUOTA_PROVIDER_WINDOWS_MAX - (cfg.showAis ? 1 : 0)) break;
-          pushWindow(`${acct.code_name} · ${win.label || win.key}`, toAgQuotaWindow(win));
+          pushWindow(`${acct.code_name} · ${win.label || win.key}`, toAgQuotaWindow(win, compact));
         }
       }
     }
@@ -139,9 +150,13 @@ export const buildQuotaUsageData = (
       const zeroCount = activeModels.filter((m) => m.available_accounts === 0).length;
       const ready = ais.account_counts?.ready ?? 0;
       const enabled = ais.account_counts?.enabled ?? 0;
-      const summaryLabel = zeroCount > 0
-        ? `${ready}/${enabled}号 · ${zeroCount}模型耗尽 · 最低${formatPercent(minPct)}`
-        : `${ready}/${enabled}号就绪 · 最低 ${formatPercent(minPct)}`;
+      const summaryLabel = compact
+        ? (zeroCount > 0
+          ? `${ready}/${enabled}号 · ${zeroCount}耗尽`
+          : `${ready}/${enabled}号 · ${formatPercent(minPct)}`)
+        : (zeroCount > 0
+          ? `${ready}/${enabled}号 · ${zeroCount}模型耗尽 · 最低${formatPercent(minPct)}`
+          : `${ready}/${enabled}号就绪 · 最低 ${formatPercent(minPct)}`);
 
       const aisSummaryWin: QuotaProviderWindow = {
         usedPercent: round1(clampPercent(100 - minPct)),
@@ -151,20 +166,24 @@ export const buildQuotaUsageData = (
       if (Number.isFinite(ais.next_reset_ms) && ais.next_reset_ms > 0) {
         aisSummaryWin.resetAt = Math.round(ais.next_reset_ms);
       }
-      pushWindow('AIStudio 号池 (Playground)', aisSummaryWin);
+      pushWindow(compact ? 'AIS 号池' : 'AIStudio 号池 (Playground)', aisSummaryWin);
 
       if (aisModels.length > 0) {
         models = {};
         for (const model of aisModels.slice(0, QUOTA_PROVIDER_MODELS_MAX)) {
           const rem = clampPercent(model.effective_percent);
+          const rawModelLabel = compact
+            ? formatAisModelCompactValueLabel(model)
+            : formatAisModelValueLabel(model);
           const modelWin: QuotaProviderWindow = {
             usedPercent: round1(clampPercent(100 - rem)),
             windowSeconds: 86_400,
-            valueLabel: safeLabel(formatAisModelValueLabel(model)),
+            ...(rawModelLabel ? { valueLabel: safeLabel(rawModelLabel) } : {}),
           };
           if (Number.isFinite(ais.next_reset_ms) && ais.next_reset_ms > 0) {
             modelWin.resetAt = Math.round(ais.next_reset_ms);
           }
+          // Preserve original model.id keys so OpenChamber's saved usageSelectedModels keep matching.
           models[safeKey(model.id || model.label)] = {
             windows: {
               daily: modelWin,
@@ -173,7 +192,7 @@ export const buildQuotaUsageData = (
         }
       }
     } else if (ais) {
-      pushWindow('AIStudio 号池', {
+      pushWindow(compact ? 'AIS 号池' : 'AIStudio 号池', {
         usedPercent: null,
         valueLabel: safeLabel(ais.status_message || '离线'),
       });

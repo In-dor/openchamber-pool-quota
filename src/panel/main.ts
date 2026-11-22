@@ -447,7 +447,7 @@ const loadState = async (force = false): Promise<void> => {
       ? '请先在 Settings → Extensions 中批准本扩展的本地服务权限。'
       : (err instanceof Error ? err.message : String(err));
     currentState = {
-      config: currentState?.config ?? { url: draftUrl, hasPasscode: false, showAis: true },
+      config: currentState?.config ?? { url: draftUrl, hasPasscode: false, showAis: true, compactQuota: true },
       snapshot: currentState?.snapshot ?? null,
       history: currentState?.history ?? null,
       error: msg,
@@ -484,6 +484,30 @@ const toggleShowAis = async (next: boolean): Promise<void> => {
   }
 };
 
+const toggleCompactQuota = async (next: boolean): Promise<void> => {
+  if (currentState) {
+    currentState = { ...currentState, config: { ...currentState.config, compactQuota: next } };
+    render();
+  }
+  try {
+    const updated = await callService<PanelStateResponse>('POST', '/panel/config', {
+      body: { compactQuota: next },
+    });
+    currentState = updated;
+    void host.toast({
+      kind: 'success',
+      message: next ? '已开启紧凑配额文案（适配手机端，Usage 刷新后同步）' : '已切换为详细配额文案（Usage 刷新后同步）',
+    });
+  } catch (err) {
+    void host.toast({
+      kind: 'error',
+      message: err instanceof Error ? err.message : '切换失败',
+    });
+  } finally {
+    render();
+  }
+};
+
 const testAndSaveSettings = async (clearPasscode = false): Promise<void> => {
   saving = true;
   settingsFeedback = { tone: 'info', text: '正在测试连接...' };
@@ -495,6 +519,7 @@ const testAndSaveSettings = async (clearPasscode = false): Promise<void> => {
         ...(draftPasscode ? { passcode: draftPasscode } : {}),
         ...(clearPasscode ? { clearPasscode: true } : {}),
         showAis: currentState?.config.showAis ?? true,
+        compactQuota: currentState?.config.compactQuota ?? true,
         save: true,
       },
     });
@@ -799,7 +824,7 @@ const render = (): void => {
   header.appendChild(actions);
   wrap.appendChild(header);
 
-  // Quick AIS switch card
+  // Quick switches card
   const toggleCard = el('div', 'pq-card');
   const switchRoot = el('div');
   const showAis = currentState?.config.showAis ?? true;
@@ -810,6 +835,16 @@ const render = (): void => {
     onChange: (checked) => void toggleShowAis(checked),
   }));
   toggleCard.appendChild(switchRoot);
+
+  const compactRoot = el('div');
+  const compactQuota = currentState?.config.compactQuota ?? true;
+  track(mountSwitch(compactRoot, {
+    label: '紧凑配额文案（适配手机端）',
+    description: '精简手机端浮层与 Usage 总卡文案避免窄屏叠字；本面板与 Work Status 始终保留完整费用与次数/Token',
+    checked: compactQuota,
+    onChange: (checked) => void toggleCompactQuota(checked),
+  }));
+  toggleCard.appendChild(compactRoot);
   wrap.appendChild(toggleCard);
 
   // Error banner

@@ -2,12 +2,14 @@ export interface PoolQuotaConfig {
   url: string;
   passcode: string;
   showAis: boolean;
+  compactQuota: boolean;
 }
 
 export interface PublicPoolQuotaConfig {
   url: string;
   hasPasscode: boolean;
   showAis: boolean;
+  compactQuota: boolean;
 }
 
 export interface AntigravityWindow {
