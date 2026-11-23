@@ -187,6 +187,7 @@ export interface AntigravityHistorySeries {
   observed_sec: number;
   points: Array<[number, number]>;
   resets: Array<[number, number]>;
+  cycle_resets?: number[];
 }
 
 export interface AntigravityHistoryResponse {

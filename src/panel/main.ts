@@ -151,6 +151,7 @@ const rateToRgb = (rate: number): string => {
 };
 
 const toMs = (ts: number): number => (ts > 1e12 ? ts : ts * 1000);
+const toSec = (ts: number): number => (ts > 1e12 ? ts / 1000 : ts);
 
 const pad2 = (n: number): string => String(n).padStart(2, '0');
 
@@ -1440,6 +1441,66 @@ const cacheHistory = (data: AntigravityHistoryResponse | null | undefined): void
 
 // ---------- Mini Cycle Burn Trend SVG ----------
 
+const CYCLE_RESET_FALLBACK_JUMP = 5;
+
+const extractSeriesResetTimes = (s: AntigravityHistorySeries): number[] => {
+  const out: number[] = [];
+
+  if (Array.isArray(s.cycle_resets) && s.cycle_resets.length > 0) {
+    for (const t of s.cycle_resets) {
+      if (typeof t === 'number' && Number.isFinite(t) && t > 0) {
+        out.push(toMs(t));
+      }
+    }
+  } else if (Array.isArray(s.resets) && s.resets.length >= 2) {
+    const pts = Array.isArray(s.points) ? s.points : [];
+    const lastRemainingBefore = (targetMs: number): number | null => {
+      let rem: number | null = null;
+      for (let j = 0; j < pts.length; j += 1) {
+        const pt = pts[j]!;
+        const ptMs = toMs(pt[0]);
+        if (ptMs < targetMs) {
+          rem = clampPercent(pt[1]);
+        } else {
+          break;
+        }
+      }
+      return rem;
+    };
+
+    for (let i = 1; i < s.resets.length; i += 1) {
+      const prev = s.resets[i - 1]!;
+      const cur = s.resets[i]!;
+      if (!Array.isArray(prev) || !Array.isArray(cur) || prev.length < 2 || cur.length < 2) {
+        continue;
+      }
+      const prevEff = toSec(prev[1]);
+      const curEff = toSec(cur[1]);
+      const curT = toMs(cur[0]);
+      if (!Number.isFinite(curT) || curT <= 0) continue;
+
+      if (prevEff > 0 && curEff > prevEff + 60) {
+        out.push(curT);
+      } else if (prevEff > 0 && curEff === 0) {
+        const preRem = lastRemainingBefore(curT);
+        if (preRem !== null && preRem < 99.999) {
+          out.push(curT);
+        }
+      }
+    }
+  }
+
+  if (out.length <= 1) return out;
+  out.sort((a, b) => a - b);
+  const deduped: number[] = [out[0]!];
+  for (let i = 1; i < out.length; i += 1) {
+    if (out[i]! > deduped[deduped.length - 1]!) {
+      deduped.push(out[i]!);
+    }
+  }
+  return deduped;
+};
+
 const buildHistorySvg = (
   history: AntigravityHistoryResponse,
   windowKind: HistoryWindowKind,
@@ -1582,18 +1643,30 @@ const buildHistorySvg = (
     });
     normalizedPoints.set(s.key, pts);
 
-    // Split segments when remaining jumps upward sharply (cycle reset)
+    // Split segments on authoritative cycle reset timestamps or >= 5% upward jump fallback
+    const resetTimes = extractSeriesResetTimes(s);
+    let resetIdx = 0;
     const segments: Array<typeof pts> = [];
+    const resetJumps: Array<{ x: number; yFrom: number; yTo: number }> = [];
     let currentSeg: typeof pts = [];
     for (let i = 0; i < pts.length; i += 1) {
       const p = pts[i]!;
       const prev = currentSeg[currentSeg.length - 1];
-      if (prev && p.r - prev.r > 12) {
-        if (currentSeg.length > 0) segments.push(currentSeg);
-        currentSeg = [p];
-      } else {
-        currentSeg.push(p);
+      if (prev) {
+        while (resetIdx < resetTimes.length && resetTimes[resetIdx]! <= prev.t) {
+          resetIdx += 1;
+        }
+        const crossedReset = resetIdx < resetTimes.length && resetTimes[resetIdx]! <= p.t;
+        if (crossedReset || p.r - prev.r >= CYCLE_RESET_FALLBACK_JUMP) {
+          // Extend previous segment horizontally to reset boundary to avoid blank gaps
+          currentSeg.push({ t: p.t, r: prev.r, x: p.x, y: prev.y });
+          segments.push(currentSeg);
+          resetJumps.push({ x: p.x, yFrom: prev.y, yTo: p.y });
+          currentSeg = [p];
+          continue;
+        }
       }
+      currentSeg.push(p);
     }
     if (currentSeg.length > 0) segments.push(currentSeg);
 
@@ -1618,7 +1691,37 @@ const buildHistorySvg = (
           'stroke-linecap': 'round',
           'stroke-linejoin': 'round',
         }));
+      } else if (seg.length === 1) {
+        // Protect freshly reset single-point cycle so 100% state stays visible on the chart
+        const only = seg[0]!;
+        const x1 = only.x + 1.5 <= W - PAD_R ? only.x : Math.max(PAD_L, only.x - 1.5);
+        const x2 = only.x + 1.5 <= W - PAD_R ? only.x + 1.5 : only.x;
+        svg.appendChild(svgEl('line', {
+          x1: x1.toFixed(1),
+          x2: x2.toFixed(1),
+          y1: only.y.toFixed(1),
+          y2: only.y.toFixed(1),
+          stroke: color,
+          'stroke-width': '1.9',
+          'stroke-linecap': 'round',
+        }));
       }
+    }
+
+    // Subtle vertical dashed connector showing step-up cycle resets
+    for (const jump of resetJumps) {
+      if (Math.abs(jump.yTo - jump.yFrom) < 1) continue;
+      svg.appendChild(svgEl('line', {
+        x1: jump.x.toFixed(1),
+        x2: jump.x.toFixed(1),
+        y1: jump.yFrom.toFixed(1),
+        y2: jump.yTo.toFixed(1),
+        stroke: color,
+        'stroke-opacity': '0.32',
+        'stroke-width': '1',
+        'stroke-dasharray': '2 2',
+        'pointer-events': 'none',
+      }));
     }
 
     // Latest point glowing halo + crisp marker dot
