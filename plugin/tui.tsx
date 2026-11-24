@@ -6,7 +6,7 @@ import { Plugin } from "@opencode/plugin/tui";
 import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 
 const DEFAULT_URL = "http://127.0.0.1:18380";
-const POLL_INTERVAL_MS = 60_000;
+const POLL_INTERVAL_MS = 30_000;
 const ALERT_COOLDOWN_MS = 15 * 60_000;
 const WINDOW_ORDER = ["gemini_5h", "gemini_weekly", "claude_5h", "claude_weekly"];
 
@@ -23,10 +23,17 @@ type AgWindow = {
   remaining_percent: number;
   used_percent: number;
   reset_at_ms: number;
+  observed_at_ms?: number;
+  stale?: boolean;
   has_current_usage: boolean;
   current_cost: number;
   has_forecast: boolean;
+  forecast_basis?: string;
   forecast_cost: number;
+  post_sample_cost_usd?: number;
+  post_sample_tokens?: number;
+  post_sample_requests?: number;
+  estimated_remaining_percent?: number | null;
 };
 
 type AisModel = {
@@ -235,14 +242,16 @@ function renderBar(remainingPercent: number, width = 12): string {
 
 async function fetchBoardSnapshot(
   cfg: PoolConfig,
-  timeoutMs = 7000,
+  options: { fresh?: boolean; timeoutMs?: number } = {},
 ): Promise<{ ok: true; data: Snapshot } | { ok: false; code: string; error: string }> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (cfg.passcode) headers["X-View-Passcode"] = cfg.passcode;
+  const timeoutMs = options.timeoutMs ?? (options.fresh ? 10_000 : 7_000);
+  const url = options.fresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
 
   let res: Response;
   try {
-    res = await fetch(`${cfg.url}/api/snapshot`, {
+    res = await fetch(url, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(timeoutMs),
@@ -337,12 +346,12 @@ export default Plugin.define({
       }
     };
 
-    const refresh = async (options: { notifyError?: boolean; alertOnLow?: boolean } = {}): Promise<boolean> => {
+    const refresh = async (options: { notifyError?: boolean; alertOnLow?: boolean; fresh?: boolean } = {}): Promise<boolean> => {
       const cfg = loadConfig(prefs, context.options);
       setConfig(cfg);
       setLoading(true);
       try {
-        const res = await fetchBoardSnapshot(cfg);
+        const res = await fetchBoardSnapshot(cfg, { fresh: options.fresh });
         if (!res.ok) {
           setErrorText(res.error);
           if (options.notifyError) {
@@ -433,7 +442,7 @@ export default Plugin.define({
         compactQuota: cur.compactQuota,
       };
 
-      const check = await fetchBoardSnapshot(candidate, 8000);
+      const check = await fetchBoardSnapshot(candidate, { timeoutMs: 8000 });
       if (!check.ok) {
         context.ui.toast.show({
           title: "连接测试失败",
@@ -499,7 +508,7 @@ export default Plugin.define({
             title: "Refresh Quota",
             bind: "r",
             run: async () => {
-              const ok = await refresh({ notifyError: true });
+              const ok = await refresh({ notifyError: true, fresh: true });
               if (ok) {
                 context.ui.toast.show({ title: "Pool Quota", message: "已刷新最新额度", variant: "success", duration: 2000 });
               }
@@ -554,11 +563,21 @@ export default Plugin.define({
                 <For each={agWindows()}>
                   {(w) => {
                     const rem = clampPct(w.remaining_percent);
+                    const estRem = typeof w.estimated_remaining_percent === "number" && Number.isFinite(w.estimated_remaining_percent)
+                      ? clampPct(w.estimated_remaining_percent)
+                      : null;
+                    const estStr = estRem !== null && (rem - estRem) >= 0.3
+                      ? ` 实时估 ~${estRem.toFixed(1)}%`
+                      : "";
+                    const forecastTag = w.forecast_basis === "previous" ? "参考" : "预测";
+                    const forecastFull = w.forecast_basis === "previous" ? "上期参考" : "满额预测";
                     const costStr = w.has_current_usage && w.current_cost > 0
                       ? (w.has_forecast && w.forecast_cost > 0
-                        ? ` ${fmtUsd(w.current_cost)}/${fmtUsd(w.forecast_cost)}`
+                        ? ` ${fmtUsd(w.current_cost)}/${forecastTag}${fmtUsd(w.forecast_cost)}`
                         : ` ${fmtUsd(w.current_cost)}`)
-                      : "";
+                      : (w.has_forecast && w.forecast_cost > 0
+                        ? ` ${forecastFull}${fmtUsd(w.forecast_cost)}`
+                        : "");
                     const resetStr = w.reset_at_ms > 0 ? ` ↻${fmtCountdown(w.reset_at_ms)}` : "";
                     return (
                       <text fg={context.theme.text.base}>
@@ -567,7 +586,7 @@ export default Plugin.define({
                           {renderBar(rem, 12)} {fmtPct(rem).padStart(5, " ")}
                         </span>
                         <span style={{ fg: context.theme.text.muted }}>
-                          {costStr}{resetStr}
+                          {estStr}{costStr}{resetStr}
                         </span>
                       </text>
                     );
@@ -719,7 +738,7 @@ export default Plugin.define({
       render: () => <FooterBadge />,
     });
 
-    // Initial silent fetch + 60s poll + post-turn alert check
+    // Initial silent fetch + 30s poll + post-turn alert check
     void refresh({ notifyError: false, alertOnLow: false });
     const timer = setInterval(() => {
       void refresh({ notifyError: false, alertOnLow: false });

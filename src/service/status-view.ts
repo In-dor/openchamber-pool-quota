@@ -7,8 +7,10 @@ import {
 } from '@openchamber/sdk';
 import {
   clampPercent,
+  forecastLabelFor,
   formatCountdown,
   formatPercent,
+  formatSampleFreshness,
   formatTokens,
   formatUsd,
   toneForRemaining,
@@ -136,14 +138,23 @@ export const buildStatusView = (
       const tone = toneForRemaining(rem);
       const costPart = win.has_current_usage && win.current_cost > 0
         ? (win.has_forecast && win.forecast_cost > 0
-          ? ` · ${formatUsd(win.current_cost)}/${formatUsd(win.forecast_cost)}`
+          ? ` · ${formatUsd(win.current_cost)}/${forecastLabelFor(win.forecast_basis, true)}${formatUsd(win.forecast_cost)}`
           : ` · ${formatUsd(win.current_cost)}`)
         : '';
       const resetPart = win.reset_at_ms > 0 ? ` · ${formatCountdown(win.reset_at_ms)}` : '';
+      const estRem = typeof win.estimated_remaining_percent === 'number' && Number.isFinite(win.estimated_remaining_percent)
+        ? clampPercent(win.estimated_remaining_percent)
+        : null;
+      const showEst = estRem !== null && (rem - estRem) >= 0.25;
+      const freshness = formatSampleFreshness(win.observed_at_ms);
       const tooltipParts = [
         `${win.label}: 剩余 ${formatPercent(rem)}`,
+        showEst ? `实时估算 ~${estRem.toFixed(1)}%` : '',
+        freshness ?? '',
         win.has_current_usage ? `本轮已用 ${formatUsd(win.current_cost)} (${win.current_requests}次)` : '本轮暂无消耗',
-        win.has_forecast && win.forecast_cost > 0 ? `满额预测 ${formatUsd(win.forecast_cost)}` : '',
+        win.has_forecast && win.forecast_cost > 0
+          ? `${forecastLabelFor(win.forecast_basis, false)} ${formatUsd(win.forecast_cost)}`
+          : '',
         win.reset_at_ms > 0 ? `重置倒计时 ${formatCountdown(win.reset_at_ms)}` : '',
       ].filter(Boolean);
 

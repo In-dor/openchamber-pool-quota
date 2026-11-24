@@ -15,8 +15,10 @@ import {
 } from '@openchamber/sdk/ui';
 import {
   clampPercent,
+  forecastLabelFor,
   formatCountdown,
   formatPercent,
+  formatSampleFreshness,
   formatTokens,
   formatUsd,
   isBottleneckTokens,
@@ -40,8 +42,8 @@ const WINDOW_ORDER = ['gemini_5h', 'gemini_weekly', 'claude_5h', 'claude_weekly'
 const SERIES_PAINT_ORDER = ['claude_weekly', 'claude_5h', 'argon_weekly', 'gemini_weekly', 'gemini_5h'];
 const SERIES_LEGEND_ORDER = ['gemini_5h', 'gemini_weekly', 'claude_5h', 'claude_weekly', 'argon_weekly'];
 const STORAGE_UI_PREFS_KEY = 'pq:panel-ui-prefs:v1';
-const AUTO_REFRESH_MS = 30_000;
-const HISTORY_FRESH_MS = 30_000;
+const AUTO_REFRESH_MS = 15_000;
+const HISTORY_FRESH_MS = 13_000;
 
 const RATE_COLOR_STOPS = [
   { r: 239, g: 68, b: 68 },   // 0%
@@ -82,6 +84,13 @@ const filterAccountWindows = (acct: AntigravityAccount): AntigravityWindow[] => 
 const isActiveAgWindow = (win: AntigravityWindow): boolean => {
   const rem = clampPercent(win.remaining_percent);
   if (rem < 99.95) return true;
+  if (
+    typeof win.estimated_remaining_percent === 'number'
+    && Number.isFinite(win.estimated_remaining_percent)
+    && rem - clampPercent(win.estimated_remaining_percent) >= 0.25
+  ) {
+    return true;
+  }
   return Boolean(win.has_current_usage && (win.current_cost > 0 || win.current_tokens > 0 || win.current_requests > 0));
 };
 
@@ -803,6 +812,60 @@ const injectStyles = (): void => {
       margin-left: auto;
     }
 
+    .pq-sample-age {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 5px;
+      height: 16px;
+      border-radius: 999px;
+      font-size: 0.69em;
+      font-weight: 500;
+      color: var(--pq-muted);
+      background: color-mix(in srgb, var(--pq-border) 42%, transparent);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .pq-sample-age.is-stale {
+      color: var(--pq-moderate);
+      background: var(--pq-moderate-bg);
+    }
+
+    .pq-win-est {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px 8px;
+      flex-wrap: wrap;
+      font-size: 0.75em;
+      padding-top: 3px;
+      border-top: 1px dashed color-mix(in srgb, var(--pq-border) 62%, transparent);
+      min-width: 0;
+    }
+
+    .pq-est-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .pq-est-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.85;
+      flex-shrink: 0;
+    }
+
+    .pq-est-delta {
+      color: var(--pq-muted);
+      white-space: nowrap;
+      margin-left: auto;
+    }
+
     /* Compact Idle 100% Windows */
     .pq-win-idle-grid {
       display: grid;
@@ -1501,6 +1564,20 @@ const extractSeriesResetTimes = (s: AntigravityHistorySeries): number[] => {
   return deduped;
 };
 
+const getValidEstimatedPoint = (s: AntigravityHistorySeries): { t: number; r: number } | null => {
+  if (!Array.isArray(s.estimated_point) || s.estimated_point.length < 2) return null;
+  const rawT = s.estimated_point[0];
+  const rawR = s.estimated_point[1];
+  if (typeof rawT !== 'number' || !Number.isFinite(rawT) || rawT <= 0) return null;
+  if (typeof rawR !== 'number' || !Number.isFinite(rawR)) return null;
+  const lastRaw = s.points[s.points.length - 1];
+  if (!lastRaw) return null;
+  const estT = toMs(rawT);
+  const lastT = toMs(lastRaw[0]);
+  if (estT <= lastT) return null;
+  return { t: estT, r: clampPercent(rawR) };
+};
+
 const buildHistorySvg = (
   history: AntigravityHistoryResponse,
   windowKind: HistoryWindowKind,
@@ -1542,6 +1619,7 @@ const buildHistorySvg = (
   const innerH = H - PAD_T - PAD_B;
   const yBase = PAD_T + innerH;
 
+  const estimatedBySeries = new Map<string, { t: number; r: number }>();
   let minT = Number.POSITIVE_INFINITY;
   let maxT = Number.NEGATIVE_INFINITY;
   for (const s of rawSeries) {
@@ -1549,6 +1627,11 @@ const buildHistorySvg = (
       const tMs = toMs(pt[0]);
       if (tMs < minT) minT = tMs;
       if (tMs > maxT) maxT = tMs;
+    }
+    const est = getValidEstimatedPoint(s);
+    if (est) {
+      estimatedBySeries.set(s.key, est);
+      if (est.t > maxT) maxT = est.t;
     }
   }
   const spanT = Math.max(1, maxT - minT);
@@ -1631,17 +1714,23 @@ const buildHistorySvg = (
   }
 
   // Series area gradients, crisp strokes, and latest point markers
-  const normalizedPoints = new Map<string, Array<{ t: number; r: number; x: number; y: number }>>();
+  const normalizedPoints = new Map<string, Array<{ t: number; r: number; x: number; y: number; estimated?: boolean }>>();
 
   for (const s of paintSeries) {
     const color = seriesColorVar(s.key, s.group);
     const gid = gradIdByKey.get(s.key)!;
-    const pts = s.points.map((pt) => {
+    const pts: Array<{ t: number; r: number; x: number; y: number; estimated?: boolean }> = s.points.map((pt) => {
       const t = toMs(pt[0]);
       const r = clampPercent(pt[1]);
       return { t, r, x: xFor(t), y: yFor(r) };
     });
-    normalizedPoints.set(s.key, pts);
+    const scrubPts = [...pts];
+    const est = estimatedBySeries.get(s.key);
+    const estCoord = est ? { t: est.t, r: est.r, x: xFor(est.t), y: yFor(est.r), estimated: true } : null;
+    if (estCoord) {
+      scrubPts.push(estCoord);
+    }
+    normalizedPoints.set(s.key, scrubPts);
 
     // Split segments on authoritative cycle reset timestamps or >= 5% upward jump fallback
     const resetTimes = extractSeriesResetTimes(s);
@@ -1724,8 +1813,34 @@ const buildHistorySvg = (
       }));
     }
 
-    // Latest point glowing halo + crisp marker dot
+    // Soft dashed tail from last authoritative sample to live estimated point (if present)
     const lastPt = pts[pts.length - 1];
+    if (lastPt && estCoord) {
+      svg.appendChild(svgEl('line', {
+        x1: lastPt.x.toFixed(1),
+        y1: lastPt.y.toFixed(1),
+        x2: estCoord.x.toFixed(1),
+        y2: estCoord.y.toFixed(1),
+        stroke: color,
+        'stroke-opacity': '0.72',
+        'stroke-width': '1.6',
+        'stroke-dasharray': '3 2.5',
+        'stroke-linecap': 'round',
+        'pointer-events': 'none',
+      }));
+      svg.appendChild(svgEl('circle', {
+        cx: estCoord.x.toFixed(1),
+        cy: estCoord.y.toFixed(1),
+        r: '2.2',
+        fill: 'var(--pq-surface)',
+        stroke: color,
+        'stroke-opacity': '0.85',
+        'stroke-width': '1.4',
+        'pointer-events': 'none',
+      }));
+    }
+
+    // Latest point glowing halo + crisp marker dot
     if (lastPt) {
       svg.appendChild(svgEl('circle', {
         cx: lastPt.x.toFixed(1),
@@ -1820,7 +1935,10 @@ const buildHistorySvg = (
     renderDefaultReadout();
   };
 
-  const findNearestPoint = (pts: Array<{ t: number; r: number; x: number; y: number }>, targetT: number) => {
+  const findNearestPoint = (
+    pts: Array<{ t: number; r: number; x: number; y: number; estimated?: boolean }>,
+    targetT: number,
+  ) => {
     let best = pts[0]!;
     let bestDist = Math.abs(best.t - targetT);
     for (let i = 1; i < pts.length; i += 1) {
@@ -1848,14 +1966,14 @@ const buildHistorySvg = (
     }
 
     let snappedTime = tHover;
-    const entries: Array<{ s: AntigravityHistorySeries; r: number }> = [];
+    const entries: Array<{ s: AntigravityHistorySeries; r: number; estimated?: boolean }> = [];
 
     for (const s of legendSeries) {
       const pts = normalizedPoints.get(s.key);
       if (!pts || pts.length === 0) continue;
       const nearest = findNearestPoint(pts, tHover);
       snappedTime = nearest.t;
-      entries.push({ s, r: nearest.r });
+      entries.push({ s, r: nearest.r, estimated: nearest.estimated });
       const dot = scrubDots.get(s.key);
       if (dot) {
         dot.setAttribute('cx', nearest.x.toFixed(1));
@@ -1873,14 +1991,14 @@ const buildHistorySvg = (
     readoutBar.replaceChildren();
     const items = el('div', 'pq-readout-items');
     items.appendChild(el('span', 'pq-readout-time pq-mono', formatScrubTime(snappedTime)));
-    for (const { s, r } of entries) {
+    for (const { s, r, estimated } of entries) {
       const lv = healthLevelFor(r);
       const item = el('span', 'pq-readout-item');
       const dot = el('span', 'pq-fam-dot');
       dot.style.background = seriesColorVar(s.key, s.group);
       item.appendChild(dot);
       item.appendChild(el('span', 'pq-muted', shortSeriesLabel(s)));
-      item.appendChild(el('strong', `pq-mono pq-lv-${lv}`, formatPercent(r)));
+      item.appendChild(el('strong', `pq-mono pq-lv-${lv}`, estimated ? `~${r.toFixed(1)}%` : formatPercent(r)));
       items.appendChild(item);
     }
     readoutBar.appendChild(items);
@@ -1980,7 +2098,7 @@ const mountChartContent = (
       account: acct.id,
       window: win,
       range: win === '7d' ? '7d' : '24h',
-      ...(forceFetch ? { force: '1' } : {}),
+      ...(forceFetch ? { refresh: '1', force: '1' } : {}),
     },
   })
     .then((data) => {
@@ -2146,6 +2264,14 @@ const renderAgWindowActive = (win: AntigravityWindow): HTMLElement => {
   dot.style.background = seriesColorVar(win.key, win.group);
   nameWrap.appendChild(dot);
   nameWrap.appendChild(el('span', 'pq-win-name', win.label || win.key));
+
+  const freshness = formatSampleFreshness(win.observed_at_ms);
+  if (freshness) {
+    const ageEl = el('span', `pq-sample-age pq-num${win.stale ? ' is-stale' : ''}`, freshness);
+    const obsMs = toMs(win.observed_at_ms);
+    ageEl.title = `真实采样时间：${new Date(obsMs).toLocaleTimeString()}`;
+    nameWrap.appendChild(ageEl);
+  }
   top.appendChild(nameWrap);
 
   const valWrap = el('div', 'pq-win-val-wrap');
@@ -2169,9 +2295,14 @@ const renderAgWindowActive = (win: AntigravityWindow): HTMLElement => {
     if (win.current_tokens > 0) parts.push(formatTokens(win.current_tokens));
     usageWrap.appendChild(el('span', '', parts.join(' / ')));
     if (win.has_forecast && win.forecast_cost > 0) {
-      const tag = win.forecast_basis === 'previous' ? '参考' : '预测';
-      usageWrap.appendChild(el('span', '', `· ${tag} ${formatUsd(win.forecast_cost)}`));
+      const tag = forecastLabelFor(win.forecast_basis, true);
+      const forecastEl = el('span', '', `· ${tag} ${formatUsd(win.forecast_cost)}`);
+      forecastEl.title = `${forecastLabelFor(win.forecast_basis, false)} ${formatUsd(win.forecast_cost)}`;
+      usageWrap.appendChild(forecastEl);
     }
+  } else if (win.has_forecast && win.forecast_cost > 0) {
+    const tag = forecastLabelFor(win.forecast_basis, false);
+    usageWrap.appendChild(el('span', '', `${tag} ${formatUsd(win.forecast_cost)}`));
   } else {
     usageWrap.appendChild(el('span', '', '本窗暂无费用记录'));
   }
@@ -2183,6 +2314,35 @@ const renderAgWindowActive = (win: AntigravityWindow): HTMLElement => {
     sub.appendChild(el('span', 'pq-win-reset pq-mono', `重置 ${formatCountdown(win.reset_at_ms)}`));
   }
   box.appendChild(sub);
+
+  const estRem = typeof win.estimated_remaining_percent === 'number' && Number.isFinite(win.estimated_remaining_percent)
+    ? clampPercent(win.estimated_remaining_percent)
+    : null;
+  if (estRem !== null && (rem - estRem) >= 0.25) {
+    const estLv = healthLevelFor(estRem);
+    const estRow = el('div', 'pq-win-est');
+    const estBadge = el('span', `pq-est-badge pq-mono pq-lv-${estLv}`);
+    estBadge.appendChild(el('span', 'pq-est-dot'));
+    estBadge.appendChild(document.createTextNode(`实时估算 ~${estRem.toFixed(1)}%`));
+    estRow.appendChild(estBadge);
+
+    const postParts: string[] = [];
+    if (typeof win.post_sample_cost_usd === 'number' && win.post_sample_cost_usd > 0) {
+      postParts.push(`+${formatUsd(win.post_sample_cost_usd)}`);
+    }
+    if (typeof win.post_sample_requests === 'number' && win.post_sample_requests > 0) {
+      postParts.push(`${Math.round(win.post_sample_requests)}次`);
+    } else if (typeof win.post_sample_tokens === 'number' && win.post_sample_tokens > 0) {
+      postParts.push(`+${formatTokens(win.post_sample_tokens)}`);
+    }
+    if (postParts.length > 0) {
+      const deltaEl = el('span', 'pq-est-delta pq-mono', `采样后 ${postParts.join(' · ')}`);
+      estRow.appendChild(deltaEl);
+    }
+    estRow.title = `基于采样后实时用量推算（权威采样值仍为 ${formatPercent(rem)}）`;
+    box.appendChild(estRow);
+  }
+
   return box;
 };
 
@@ -2677,7 +2837,7 @@ const refreshAdditionalAccountHistories = (snapshot: BoardSnapshot, force: boole
         account: acct.id,
         window: win,
         range: win === '7d' ? '7d' : '24h',
-        ...(force ? { force: '1' } : {}),
+        ...(force ? { refresh: '1', force: '1' } : {}),
       },
     })
       .then((data) => {
@@ -2712,7 +2872,7 @@ const loadState = async (force = false, silent = false): Promise<void> => {
   try {
     const state = await callService<PanelStateResponse>('GET', '/panel/state', {
       query: {
-        force: force ? '1' : '0',
+        ...(force ? { refresh: '1', force: '1' } : {}),
         window: primaryWin,
         range: primaryWin === '7d' ? '7d' : '24h',
       },
@@ -3019,15 +3179,27 @@ const render = (): void => {
 
 // ---------- Silent Visibility-Aware Auto-Refresh ----------
 
+const canSilentAutoRefresh = (): boolean => {
+  if (document.visibilityState !== 'visible') return false;
+  if (loading || saving || draftDirty || activeScrubCount > 0) return false;
+  const activeTag = document.activeElement?.tagName;
+  if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return false;
+  return true;
+};
+
 const startSilentAutoRefresh = (): void => {
   if (autoRefreshTimer !== null) return;
   autoRefreshTimer = window.setInterval(() => {
-    if (document.visibilityState !== 'visible') return;
-    if (loading || saving || draftDirty || activeScrubCount > 0) return;
-    const activeTag = document.activeElement?.tagName;
-    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
+    if (!canSilentAutoRefresh()) return;
     void loadState(false, true);
   }, AUTO_REFRESH_MS);
+
+  document.addEventListener('visibilitychange', () => {
+    if (!canSilentAutoRefresh()) return;
+    if (Date.now() - (currentState?.fetchedAtMs ?? 0) >= AUTO_REFRESH_MS) {
+      void loadState(false, true);
+    }
+  });
 };
 
 // ---------- Bootstrap ----------

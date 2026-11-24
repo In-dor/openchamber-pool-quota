@@ -10,9 +10,10 @@ export type BoardFetchResult<T> =
   | { ok: true; data: T; fetchedAtMs: number }
   | { ok: false; code: BoardFetchErrorCode; status?: number; message: string; fetchedAtMs: number };
 
-const SNAPSHOT_TTL_MS = 12_000;
-const HISTORY_TTL_MS = 30_000;
+const SNAPSHOT_TTL_MS = 8_000;
+const HISTORY_TTL_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 10_000;
+const FRESH_REQUEST_TIMEOUT_MS = 12_000;
 
 let snapshotCache: { key: string; fetchedAtMs: number; data: BoardSnapshot } | null = null;
 const historyCache = new Map<string, { fetchedAtMs: number; data: AntigravityHistoryResponse }>();
@@ -36,20 +37,24 @@ const buildHeaders = (cfg: PoolQuotaConfig): Record<string, string> => {
 
 export const fetchBoardSnapshot = async (
   cfg: PoolQuotaConfig,
-  options: { force?: boolean; timeoutMs?: number } = {},
+  options: { force?: boolean; fresh?: boolean; timeoutMs?: number } = {},
 ): Promise<BoardFetchResult<BoardSnapshot>> => {
   const now = Date.now();
   const key = cacheKeyOf(cfg);
-  if (!options.force && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
+  const bypassCache = Boolean(options.force || options.fresh);
+  const useFresh = options.fresh ?? Boolean(options.force);
+  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
     return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
   }
 
+  const snapshotUrl = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
+
   let response: Response;
   try {
-    response = await fetch(`${cfg.url}/api/snapshot`, {
+    response = await fetch(snapshotUrl, {
       method: 'GET',
       headers: buildHeaders(cfg),
-      signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options.timeoutMs ?? (useFresh ? FRESH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS)),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_URL = "http://127.0.0.1:18380";
-const CACHE_TTL_MS = 30_000;
+const CACHE_TTL_MS = 15_000;
 const CORE_AIS_MODELS = ["gemini-4-carbon", "gemini-4-neon", "gemini-4-argon", "gemini-4-hydrogen"];
 const WINDOW_ORDER = ["gemini_5h", "gemini_weekly", "claude_5h", "claude_weekly"];
 
@@ -138,7 +138,9 @@ function fmtCountdown(resetAtMs) {
 async function fetchSnapshot(cfg, options = {}) {
   const now = Date.now();
   const key = `${cfg.url}|${cfg.passcode.length > 0 ? "auth" : "open"}`;
-  if (!options.force && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < CACHE_TTL_MS) {
+  const bypassCache = Boolean(options.force || options.fresh);
+  const useFresh = options.fresh ?? Boolean(options.force);
+  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < CACHE_TTL_MS) {
     return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
   }
 
@@ -146,7 +148,7 @@ async function fetchSnapshot(cfg, options = {}) {
   if (cfg.passcode) headers["X-View-Passcode"] = cfg.passcode;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 6000);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? (useFresh ? 10_000 : 6_000));
   if (options.signal) {
     if (options.signal.aborted) {
       clearTimeout(timer);
@@ -155,9 +157,10 @@ async function fetchSnapshot(cfg, options = {}) {
     options.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  const url = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
   let res;
   try {
-    res = await fetch(`${cfg.url}/api/snapshot`, { method: "GET", headers, signal: controller.signal });
+    res = await fetch(url, { method: "GET", headers, signal: controller.signal });
   } catch (err) {
     return {
       ok: false,
@@ -215,12 +218,23 @@ function summarizeSnapshot(snap, cfg, options = {}) {
 
   const fmtWinInline = (name, w) => {
     if (!w) return "";
+    const rem = clampPct(w.remaining_percent);
+    const estRem = typeof w.estimated_remaining_percent === "number" && Number.isFinite(w.estimated_remaining_percent)
+      ? clampPct(w.estimated_remaining_percent)
+      : null;
+    const est = estRem !== null && (rem - estRem) >= 0.3
+      ? ` 实时估 ~${estRem.toFixed(1)}%`
+      : "";
+    const forecastTag = w.forecast_basis === "previous" ? "参考" : "预测";
+    const forecastFull = w.forecast_basis === "previous" ? "上期参考" : "满额预测";
     const cost = w.has_current_usage && w.current_cost > 0
       ? (w.has_forecast && w.forecast_cost > 0
-        ? ` (${fmtUsd(w.current_cost)}/${fmtUsd(w.forecast_cost)})`
+        ? ` (${fmtUsd(w.current_cost)}/${forecastTag}${fmtUsd(w.forecast_cost)})`
         : ` (${fmtUsd(w.current_cost)})`)
-      : "";
-    return `${name} ${fmtPct(w.remaining_percent)}${cost}`;
+      : (w.has_forecast && w.forecast_cost > 0
+        ? ` (${forecastFull}${fmtUsd(w.forecast_cost)})`
+        : "");
+    return `${name} ${fmtPct(rem)}${est}${cost}`;
   };
 
   const ag5hText = includeAg
@@ -299,16 +313,35 @@ function summarizeSnapshot(snap, cfg, options = {}) {
       online: Boolean(ag.online),
       status: ag.status || "unknown",
       active_accounts: ag.summary?.active_accounts ?? ag.accounts?.length ?? 0,
-      windows: agWindows.map((w) => ({
-        key: w.key,
-        label: w.label,
-        remaining_percent: clampPct(w.remaining_percent),
-        used_percent: clampPct(w.used_percent),
-        current_cost_usd: w.current_cost ?? 0,
-        forecast_cost_usd: w.has_forecast ? (w.forecast_cost ?? 0) : null,
-        reset_in: w.reset_at_ms > 0 ? fmtCountdown(w.reset_at_ms) : null,
-        reset_at_ms: w.reset_at_ms || null,
-      })),
+      windows: agWindows.map((w) => {
+        const rem = clampPct(w.remaining_percent);
+        const estRem = typeof w.estimated_remaining_percent === "number" && Number.isFinite(w.estimated_remaining_percent)
+          ? clampPct(w.estimated_remaining_percent)
+          : null;
+        const hasSignificantEst = estRem !== null && (rem - estRem) >= 0.3;
+        return {
+          key: w.key,
+          label: w.label,
+          remaining_percent: rem,
+          used_percent: clampPct(w.used_percent),
+          ...(estRem !== null ? { estimated_remaining_percent: estRem } : {}),
+          ...(hasSignificantEst ? { live_estimate_note: `实时估 ~${estRem.toFixed(1)}%` } : {}),
+          ...(typeof w.post_sample_cost_usd === "number" ? { post_sample_cost_usd: w.post_sample_cost_usd } : {}),
+          ...(typeof w.post_sample_tokens === "number" ? { post_sample_tokens: w.post_sample_tokens } : {}),
+          ...(typeof w.post_sample_requests === "number" ? { post_sample_requests: w.post_sample_requests } : {}),
+          ...(w.observed_at_ms > 0 ? { observed_at_ms: w.observed_at_ms } : {}),
+          current_cost_usd: w.current_cost ?? 0,
+          forecast_cost_usd: w.has_forecast ? (w.forecast_cost ?? 0) : null,
+          ...(w.has_forecast
+            ? {
+              forecast_basis: w.forecast_basis || "quota",
+              forecast_label: w.forecast_basis === "previous" ? "上期参考" : "满额预测",
+            }
+            : {}),
+          reset_in: w.reset_at_ms > 0 ? fmtCountdown(w.reset_at_ms) : null,
+          reset_at_ms: w.reset_at_ms || null,
+        };
+      }),
     };
   }
 
@@ -374,7 +407,7 @@ export default {
       editor.add({
         name: "pool_quota",
         description:
-          "Query real-time Antigravity (4 windows: remaining %, current/forecast USD cost, reset countdown) and AIStudio2API (10 models: available accounts, remaining requests/tokens, bottleneck %) quotas from Pool Status Board.",
+          "Query real-time Antigravity (4 windows: remaining %, optional live burn estimate, current/forecast or previous-cycle reference USD cost, reset countdown) and AIStudio2API (10 models: available accounts, remaining requests/tokens, bottleneck %) quotas from Pool Status Board.",
         input: {
           type: "object",
           properties: {
@@ -389,7 +422,7 @@ export default {
             },
             refresh: {
               type: "boolean",
-              description: "Bypass the 30s in-memory cache and fetch fresh snapshot.",
+              description: "Bypass the 15s in-memory cache and request a fresh snapshot (?fresh=1) from the board.",
             },
           },
           additionalProperties: false,
@@ -399,8 +432,9 @@ export default {
           const cfg = loadConfig(pluginOptions);
           const result = await fetchSnapshot(cfg, {
             force: args.refresh === true,
+            fresh: args.refresh === true,
             signal: toolCtx?.signal,
-            timeoutMs: 8000,
+            timeoutMs: args.refresh === true ? 10_000 : 8_000,
           });
           if (!result.ok) {
             return {

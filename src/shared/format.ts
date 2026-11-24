@@ -44,6 +44,27 @@ export const formatCountdown = (resetAtMs: number | null | undefined, nowMs = Da
   return `${Math.max(1, mins)}m`;
 };
 
+export const formatSampleFreshness = (
+  observedAtMs: number | null | undefined,
+  nowMs = Date.now(),
+): string | null => {
+  if (!observedAtMs || !Number.isFinite(observedAtMs) || observedAtMs <= 0) return null;
+  const obsMs = observedAtMs > 1e12 ? observedAtMs : observedAtMs * 1000;
+  const diffSec = Math.max(0, Math.floor((nowMs - obsMs) / 1000));
+  if (diffSec < 60) return '刚刚采样';
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `采样 ${mins}m 前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `采样 ${hours}h 前`;
+  const days = Math.floor(hours / 24);
+  return `采样 ${days}d 前`;
+};
+
+export const forecastLabelFor = (basis?: string, compact = false): string => {
+  if (basis === 'previous') return compact ? '参考' : '上期参考';
+  return compact ? '预测' : '满额预测';
+};
+
 export const toneForRemaining = (remainingPercent: number): 'success' | 'warning' | 'error' => {
   const rem = clampPercent(remainingPercent);
   if (rem <= 20) return 'error';
@@ -55,7 +76,8 @@ export const formatAgWindowValueLabel = (win: AntigravityWindow): string => {
   const rem = formatPercent(win.remaining_percent);
   if (win.has_current_usage && win.current_cost > 0) {
     if (win.has_forecast && win.forecast_cost > 0) {
-      return `剩 ${rem} · ${formatUsd(win.current_cost)} / 预测${formatUsd(win.forecast_cost)}`;
+      const tag = forecastLabelFor(win.forecast_basis, false);
+      return `剩 ${rem} · ${formatUsd(win.current_cost)} / ${tag}${formatUsd(win.forecast_cost)}`;
     }
     return `剩 ${rem} · 已用${formatUsd(win.current_cost)}`;
   }

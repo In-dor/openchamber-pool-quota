@@ -64,9 +64,9 @@ const parseJsonObject = (raw: string): Record<string, unknown> => {
 
 const buildPanelState = async (
   cfg: PoolQuotaConfig,
-  options: { force?: boolean; historyWindow?: '5h' | '7d'; historyRange?: string } = {},
+  options: { force?: boolean; fresh?: boolean; historyWindow?: '5h' | '7d'; historyRange?: string } = {},
 ): Promise<PanelStateResponse> => {
-  const snapRes = await fetchBoardSnapshot(cfg, { force: options.force });
+  const snapRes = await fetchBoardSnapshot(cfg, { force: options.force, fresh: options.fresh });
   if (!snapRes.ok) {
     return {
       config: toPublicConfig(cfg),
@@ -126,7 +126,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
     const cfg = loadConfig();
-    const snapRes = await fetchBoardSnapshot(cfg, { force: true });
+    const snapRes = await fetchBoardSnapshot(cfg);
     const result: QuotaProviderResult = snapRes.ok
       ? { ok: true, data: buildQuotaUsageData(snapRes.data, cfg) }
       : { ok: true, data: buildQuotaErrorData(snapRes.message) };
@@ -173,7 +173,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     if (actionId === 'refresh') {
       clearBoardCache();
       const cfg = loadConfig();
-      await fetchBoardSnapshot(cfg, { force: true });
+      await fetchBoardSnapshot(cfg, { force: true, fresh: true });
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -183,12 +183,12 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
 
   // Rail Panel endpoints
   if (pathname === '/panel/state' && method === 'GET') {
-    const force = parsedUrl.searchParams.get('force') === '1';
+    const refresh = parsedUrl.searchParams.get('refresh') === '1' || parsedUrl.searchParams.get('force') === '1';
     const histWinParam = parsedUrl.searchParams.get('window');
     const historyWindow: '5h' | '7d' = histWinParam === '7d' ? '7d' : '5h';
     const historyRange = parsedUrl.searchParams.get('range') || (historyWindow === '7d' ? '7d' : '24h');
     const cfg = loadConfig();
-    const state = await buildPanelState(cfg, { force, historyWindow, historyRange });
+    const state = await buildPanelState(cfg, { force: refresh, fresh: refresh, historyWindow, historyRange });
     sendJson(res, 200, state);
     return;
   }
@@ -213,7 +213,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     }
     const nextCfg = saveConfig(patch);
     clearBoardCache();
-    const state = await buildPanelState(nextCfg, { force: true });
+    const state = await buildPanelState(nextCfg, { force: true, fresh: false });
     sendJson(res, 200, state);
     return;
   }
@@ -238,7 +238,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       compactQuota: testCompactQuota,
     };
 
-    const snapRes = await fetchBoardSnapshot(candidate, { force: true, timeoutMs: 8_000 });
+    const snapRes = await fetchBoardSnapshot(candidate, { force: true, fresh: false, timeoutMs: 8_000 });
     if (!snapRes.ok) {
       sendJson(res, 200, {
         ok: false,
@@ -284,7 +284,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       accountId,
       window: windowKind,
       range,
-      force: parsedUrl.searchParams.get('force') === '1',
+      force: parsedUrl.searchParams.get('refresh') === '1' || parsedUrl.searchParams.get('force') === '1',
     });
     if (!histRes.ok) {
       sendJson(res, 502, { error: histRes.message });

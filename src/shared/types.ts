@@ -30,6 +30,10 @@ export interface AntigravityWindow {
   forecast_basis?: string;
   forecast_tokens: number;
   forecast_cost: number;
+  post_sample_cost_usd?: number;
+  post_sample_tokens?: number;
+  post_sample_requests?: number;
+  estimated_remaining_percent?: number | null;
 }
 
 export interface AntigravityTrendSeries {
@@ -188,6 +192,7 @@ export interface AntigravityHistorySeries {
   points: Array<[number, number]>;
   resets: Array<[number, number]>;
   cycle_resets?: number[];
+  estimated_point?: [number, number] | null;
 }
 
 export interface AntigravityHistoryResponse {

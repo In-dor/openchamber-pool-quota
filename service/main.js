@@ -364,9 +364,10 @@ var toPublicConfig = (cfg) => ({
 });
 
 // src/service/client.ts
-var SNAPSHOT_TTL_MS = 12000;
-var HISTORY_TTL_MS = 30000;
+var SNAPSHOT_TTL_MS = 8000;
+var HISTORY_TTL_MS = 20000;
 var REQUEST_TIMEOUT_MS = 1e4;
+var FRESH_REQUEST_TIMEOUT_MS = 12000;
 var snapshotCache = null;
 var historyCache = new Map;
 var clearBoardCache = () => {
@@ -386,15 +387,18 @@ var buildHeaders = (cfg) => {
 var fetchBoardSnapshot = async (cfg, options = {}) => {
   const now = Date.now();
   const key = cacheKeyOf(cfg);
-  if (!options.force && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
+  const bypassCache = Boolean(options.force || options.fresh);
+  const useFresh = options.fresh ?? Boolean(options.force);
+  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
     return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
   }
+  const snapshotUrl = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
   let response;
   try {
-    response = await fetch(`${cfg.url}/api/snapshot`, {
+    response = await fetch(snapshotUrl, {
       method: "GET",
       headers: buildHeaders(cfg),
-      signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)
+      signal: AbortSignal.timeout(options.timeoutMs ?? (useFresh ? FRESH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS))
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -559,6 +563,27 @@ var formatCountdown = (resetAtMs, nowMs = Date.now()) => {
     return `${hours}h ${mins}m`;
   return `${Math.max(1, mins)}m`;
 };
+var formatSampleFreshness = (observedAtMs, nowMs = Date.now()) => {
+  if (!observedAtMs || !Number.isFinite(observedAtMs) || observedAtMs <= 0)
+    return null;
+  const obsMs = observedAtMs > 1000000000000 ? observedAtMs : observedAtMs * 1000;
+  const diffSec = Math.max(0, Math.floor((nowMs - obsMs) / 1000));
+  if (diffSec < 60)
+    return "刚刚采样";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60)
+    return `采样 ${mins}m 前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24)
+    return `采样 ${hours}h 前`;
+  const days = Math.floor(hours / 24);
+  return `采样 ${days}d 前`;
+};
+var forecastLabelFor = (basis, compact = false) => {
+  if (basis === "previous")
+    return compact ? "参考" : "上期参考";
+  return compact ? "预测" : "满额预测";
+};
 var toneForRemaining = (remainingPercent) => {
   const rem = clampPercent(remainingPercent);
   if (rem <= 20)
@@ -571,7 +596,8 @@ var formatAgWindowValueLabel = (win) => {
   const rem = formatPercent(win.remaining_percent);
   if (win.has_current_usage && win.current_cost > 0) {
     if (win.has_forecast && win.forecast_cost > 0) {
-      return `剩 ${rem} · ${formatUsd(win.current_cost)} / 预测${formatUsd(win.forecast_cost)}`;
+      const tag = forecastLabelFor(win.forecast_basis, false);
+      return `剩 ${rem} · ${formatUsd(win.current_cost)} / ${tag}${formatUsd(win.forecast_cost)}`;
     }
     return `剩 ${rem} · 已用${formatUsd(win.current_cost)}`;
   }
@@ -868,12 +894,17 @@ var buildStatusView = (snapshot, history, cfg) => {
     for (const win of sorted.slice(0, 4)) {
       const rem = clampPercent(win.remaining_percent);
       const tone = toneForRemaining(rem);
-      const costPart = win.has_current_usage && win.current_cost > 0 ? win.has_forecast && win.forecast_cost > 0 ? ` · ${formatUsd(win.current_cost)}/${formatUsd(win.forecast_cost)}` : ` · ${formatUsd(win.current_cost)}` : "";
+      const costPart = win.has_current_usage && win.current_cost > 0 ? win.has_forecast && win.forecast_cost > 0 ? ` · ${formatUsd(win.current_cost)}/${forecastLabelFor(win.forecast_basis, true)}${formatUsd(win.forecast_cost)}` : ` · ${formatUsd(win.current_cost)}` : "";
       const resetPart = win.reset_at_ms > 0 ? ` · ${formatCountdown(win.reset_at_ms)}` : "";
+      const estRem = typeof win.estimated_remaining_percent === "number" && Number.isFinite(win.estimated_remaining_percent) ? clampPercent(win.estimated_remaining_percent) : null;
+      const showEst = estRem !== null && rem - estRem >= 0.25;
+      const freshness = formatSampleFreshness(win.observed_at_ms);
       const tooltipParts = [
         `${win.label}: 剩余 ${formatPercent(rem)}`,
+        showEst ? `实时估算 ~${estRem.toFixed(1)}%` : "",
+        freshness ?? "",
         win.has_current_usage ? `本轮已用 ${formatUsd(win.current_cost)} (${win.current_requests}次)` : "本轮暂无消耗",
-        win.has_forecast && win.forecast_cost > 0 ? `满额预测 ${formatUsd(win.forecast_cost)}` : "",
+        win.has_forecast && win.forecast_cost > 0 ? `${forecastLabelFor(win.forecast_basis, false)} ${formatUsd(win.forecast_cost)}` : "",
         win.reset_at_ms > 0 ? `重置倒计时 ${formatCountdown(win.reset_at_ms)}` : ""
       ].filter(Boolean);
       pushRow({
@@ -1039,7 +1070,7 @@ var parseJsonObject = (raw) => {
   return parsed;
 };
 var buildPanelState = async (cfg, options = {}) => {
-  const snapRes = await fetchBoardSnapshot(cfg, { force: options.force });
+  const snapRes = await fetchBoardSnapshot(cfg, { force: options.force, fresh: options.fresh });
   if (!snapRes.ok) {
     return {
       config: toPublicConfig(cfg),
@@ -1092,7 +1123,7 @@ var handleRequest = async (req, res) => {
       return;
     }
     const cfg = loadConfig();
-    const snapRes = await fetchBoardSnapshot(cfg, { force: true });
+    const snapRes = await fetchBoardSnapshot(cfg);
     const result = snapRes.ok ? { ok: true, data: buildQuotaUsageData(snapRes.data, cfg) } : { ok: true, data: buildQuotaErrorData(snapRes.message) };
     sendJson(res, 200, result);
     return;
@@ -1133,7 +1164,7 @@ var handleRequest = async (req, res) => {
     if (actionId === "refresh") {
       clearBoardCache();
       const cfg = loadConfig();
-      await fetchBoardSnapshot(cfg, { force: true });
+      await fetchBoardSnapshot(cfg, { force: true, fresh: true });
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -1141,12 +1172,12 @@ var handleRequest = async (req, res) => {
     return;
   }
   if (pathname === "/panel/state" && method === "GET") {
-    const force = parsedUrl.searchParams.get("force") === "1";
+    const refresh = parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1";
     const histWinParam = parsedUrl.searchParams.get("window");
     const historyWindow = histWinParam === "7d" ? "7d" : "5h";
     const historyRange = parsedUrl.searchParams.get("range") || (historyWindow === "7d" ? "7d" : "24h");
     const cfg = loadConfig();
-    const state = await buildPanelState(cfg, { force, historyWindow, historyRange });
+    const state = await buildPanelState(cfg, { force: refresh, fresh: refresh, historyWindow, historyRange });
     sendJson(res, 200, state);
     return;
   }
@@ -1170,7 +1201,7 @@ var handleRequest = async (req, res) => {
     }
     const nextCfg = saveConfig(patch);
     clearBoardCache();
-    const state = await buildPanelState(nextCfg, { force: true });
+    const state = await buildPanelState(nextCfg, { force: true, fresh: false });
     sendJson(res, 200, state);
     return;
   }
@@ -1188,7 +1219,7 @@ var handleRequest = async (req, res) => {
       showAis: testShowAis,
       compactQuota: testCompactQuota
     };
-    const snapRes = await fetchBoardSnapshot(candidate, { force: true, timeoutMs: 8000 });
+    const snapRes = await fetchBoardSnapshot(candidate, { force: true, fresh: false, timeoutMs: 8000 });
     if (!snapRes.ok) {
       sendJson(res, 200, {
         ok: false,
@@ -1231,7 +1262,7 @@ var handleRequest = async (req, res) => {
       accountId,
       window: windowKind,
       range,
-      force: parsedUrl.searchParams.get("force") === "1"
+      force: parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1"
     });
     if (!histRes.ok) {
       sendJson(res, 502, { error: histRes.message });
