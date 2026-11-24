@@ -133,6 +133,7 @@ export interface AIStudioChannelSummary {
 export interface AIStudioModelSummary {
   id: string;
   label: string;
+  category?: string;
   eligible_tiers: string[];
   eligible_accounts: number;
   available_accounts: number;

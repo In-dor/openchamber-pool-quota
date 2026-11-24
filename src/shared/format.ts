@@ -97,23 +97,100 @@ export const formatAgWindowCompactValueLabel = (win: AntigravityWindow): string 
   return null;
 };
 
+export const MOBILE_COMPACT_ROW_MAX_PX = 282;
+export const MOBILE_COMPACT_GAP_PX = 12;
+
+export const isRequestsOnlyAisModel = (
+  model: Pick<AIStudioModelSummary, 'limit_tokens'>,
+): boolean => !Number.isFinite(model.limit_tokens) || (model.limit_tokens ?? 0) <= 0;
+
+/**
+ * Conservative 14px UI sans-serif (tabular-nums) width estimator for OpenChamber
+ * 360dp mobile UsageProviderCards (~286px usable row width; target <= 282px).
+ */
+export const estimateMobileTextWidthPx = (text: string): number => {
+  let width = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (
+      (code >= 0x2e80 && code <= 0x9fff)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0xff00 && code <= 0xffef)
+    ) {
+      width += 14.0;
+    } else if (ch >= '0' && ch <= '9') {
+      width += 8.4;
+    } else if (ch === '%') {
+      width += 11.0;
+    } else if (ch === '/' || ch === '·' || ch === '-') {
+      width += 5.0;
+    } else if (ch === '(' || ch === ')') {
+      width += 4.5;
+    } else if (ch === '.' || ch === ':' || ch === ',') {
+      width += 4.0;
+    } else if (ch === ' ') {
+      width += 4.0;
+    } else if (ch === 'i' || ch === 'l' || ch === 'j' || ch === 'I') {
+      width += 3.5;
+    } else if (ch === 'f' || ch === 'r' || ch === 't') {
+      width += 5.0;
+    } else if (ch === 'm' || ch === 'w' || ch === 'M' || ch === 'W') {
+      width += 11.6;
+    } else if (ch >= 'a' && ch <= 'z') {
+      width += 7.8;
+    } else if (ch >= 'A' && ch <= 'Z') {
+      width += 9.4;
+    } else {
+      width += 8.4;
+    }
+  }
+  return round1(width);
+};
+
 export const formatAisModelValueLabel = (model: AIStudioModelSummary): string => {
   const acct = `${model.available_accounts}/${model.eligible_accounts}号`;
   const remReq = `${model.effective_remaining_requests}次`;
-  const remTok = formatTokens(model.effective_remaining_tokens);
   const pct = formatPercent(model.effective_percent);
+  if (isRequestsOnlyAisModel(model)) {
+    return `${acct} · ${pct} · 剩${remReq}`;
+  }
+  const remTok = formatTokens(model.effective_remaining_tokens);
   return `${acct} · ${pct} · 剩${remReq}/${remTok}`;
 };
 
 export const formatAisModelCompactValueLabel = (model: AIStudioModelSummary): string | null => {
-  if (model.eligible_accounts <= 0) {
-    return '0/0号';
+  const modelKey = model.id || model.label || '';
+  const idLen = modelKey.length;
+  const elig = Math.max(0, Math.round(model.eligible_accounts || 0));
+  const avail = Math.max(0, Math.round(model.available_accounts || 0));
+  const rawLeftPx = estimateMobileTextWidthPx(`${modelKey} · 每日`);
+  const leftWidthPx = Math.max(rawLeftPx, idLen >= 27 ? 215 : idLen >= 22 ? 192 : 0);
+  const budgetPx = MOBILE_COMPACT_ROW_MAX_PX - MOBILE_COMPACT_GAP_PX - leftWidthPx;
+
+  const pickFitting = (candidates: string[]): string => {
+    for (const candidate of candidates) {
+      if (estimateMobileTextWidthPx(candidate) <= budgetPx) {
+        return candidate;
+      }
+    }
+    return candidates[candidates.length - 1]!;
+  };
+
+  if (elig <= 0) {
+    return pickFitting(['0/0号', '0/0']);
   }
-  if (model.available_accounts <= 0) {
-    return `0/${model.eligible_accounts}号 · 耗尽`;
+  if (avail <= 0) {
+    if (idLen > 20) {
+      return '耗尽';
+    }
+    return pickFitting([`0/${elig}·耗尽`, '耗尽']);
   }
-  if (model.available_accounts < model.eligible_accounts) {
-    return `${model.available_accounts}/${model.eligible_accounts}号 · ${formatPercent(model.effective_percent)}`;
+  if (avail < elig) {
+    const pct = `${Math.round(clampPercent(model.effective_percent))}%`;
+    if (idLen > 22) {
+      return pickFitting([`${pct}·${avail}`, `${avail}/${elig}`, pct]);
+    }
+    return pickFitting([`${avail}/${elig}·${pct}`, `${pct}·${avail}`, `${avail}/${elig}`, pct]);
   }
   // All eligible accounts are available: omit valueLabel so OpenChamber natively renders
   // the concise percentage (e.g. "97%"), keeping narrow mobile rows completely overlap-free.
@@ -121,8 +198,9 @@ export const formatAisModelCompactValueLabel = (model: AIStudioModelSummary): st
 };
 
 export const isBottleneckTokens = (model: AIStudioModelSummary): boolean => {
+  if (isRequestsOnlyAisModel(model)) return false;
   const reqPct = model.limit_requests > 0 ? (model.effective_remaining_requests / model.limit_requests) * 100 : 100;
-  const tokPct = model.limit_tokens > 0 ? (model.effective_remaining_tokens / model.limit_tokens) * 100 : 100;
+  const tokPct = (model.effective_remaining_tokens / model.limit_tokens) * 100;
   return tokPct < reqPct - 0.5;
 };
 

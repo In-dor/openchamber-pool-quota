@@ -39,11 +39,14 @@ type AgWindow = {
 type AisModel = {
   id: string;
   label: string;
+  category?: string;
   eligible_accounts: number;
   available_accounts: number;
   limit_requests: number;
+  used_requests?: number;
   effective_remaining_requests: number;
   limit_tokens: number;
+  used_tokens?: number;
   effective_remaining_tokens: number;
   effective_percent: number;
 };
@@ -238,6 +241,27 @@ function renderBar(remainingPercent: number, width = 12): string {
   const clamped = clampPct(remainingPercent);
   const filled = Math.round((clamped / 100) * width);
   return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
+}
+
+function isRequestsOnlyModel(model: Pick<AisModel, "limit_tokens">): boolean {
+  return !Number.isFinite(model.limit_tokens) || (model.limit_tokens ?? 0) <= 0;
+}
+
+function shortFooterModelName(id: string): string {
+  const map: Record<string, string> = {
+    "gemini-nano-banana-2.1": "banana-2.1",
+    "gemini-3-pro-image": "banana-pro",
+    "gemini-3.1-flash-image": "banana-2",
+    "gemini-3.1-flash-lite-image": "banana-lite",
+  };
+  if (map[id]) return map[id];
+  if (id.startsWith("gemini-nano-banana-")) {
+    return id.replace(/^gemini-nano-/, "");
+  }
+  if (id.endsWith("-image")) {
+    return id.replace(/^gemini-/, "img-").replace(/-image$/, "");
+  }
+  return id.replace(/^gemini-4-/, "").replace(/^gemini-/, "g");
 }
 
 async function fetchBoardSnapshot(
@@ -492,6 +516,9 @@ export default Plugin.define({
       });
 
       const aisModels = createMemo(() => snapshot()?.aistudio?.models ?? []);
+      const aisIdColWidth = createMemo(() => (
+        Math.max(23, ...aisModels().map((item) => item.id.length + 1))
+      ));
 
       context.keymap.layer(() => ({
         mode: "global",
@@ -605,14 +632,17 @@ export default Plugin.define({
                           ? context.theme.text.feedback.error.base
                           : toneColor(rem);
                         const activeMark = currentModelId() === m.id ? "▸ " : "  ";
+                        const remText = isRequestsOnlyModel(m)
+                          ? `剩${m.effective_remaining_requests}次`
+                          : `剩${m.effective_remaining_requests}次/${fmtTokens(m.effective_remaining_tokens)}`;
                         return (
                           <text fg={context.theme.text.base}>
-                            {activeMark}{m.id.padEnd(23, " ")}{" "}
+                            {activeMark}{m.id.padEnd(aisIdColWidth(), " ")}{" "}
                             <span style={{ fg: color }}>
                               {renderBar(rem, 10)} {fmtPct(rem).padStart(5, " ")}
                             </span>
                             <span style={{ fg: context.theme.text.muted }}>
-                              {" "}{m.available_accounts}/{m.eligible_accounts}号 剩{m.effective_remaining_requests}次/{fmtTokens(m.effective_remaining_tokens)}
+                              {" "}{m.available_accounts}/{m.eligible_accounts}号 {remText}
                             </span>
                           </text>
                         );
@@ -675,7 +705,7 @@ export default Plugin.define({
             const activeId = currentModelId();
             const matched = activeId ? snap.aistudio.models?.find((m) => m.id === activeId) : undefined;
             if (matched) {
-              const shortName = matched.id.replace(/^gemini-4-/, "").replace(/^gemini-/, "g");
+              const shortName = shortFooterModelName(matched.id);
               const pct = Math.round(clampPct(matched.effective_percent));
               worstPct = Math.min(worstPct, matched.available_accounts === 0 ? 0 : pct);
               parts.push(`${shortName}:${pct}%(${matched.available_accounts}/${matched.eligible_accounts})`);

@@ -613,22 +613,84 @@ var formatAgWindowCompactValueLabel = (win) => {
   }
   return null;
 };
+var MOBILE_COMPACT_ROW_MAX_PX = 282;
+var MOBILE_COMPACT_GAP_PX = 12;
+var isRequestsOnlyAisModel = (model) => !Number.isFinite(model.limit_tokens) || (model.limit_tokens ?? 0) <= 0;
+var estimateMobileTextWidthPx = (text) => {
+  let width = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 11904 && code <= 40959 || code >= 63744 && code <= 64255 || code >= 65280 && code <= 65519) {
+      width += 14;
+    } else if (ch >= "0" && ch <= "9") {
+      width += 8.4;
+    } else if (ch === "%") {
+      width += 11;
+    } else if (ch === "/" || ch === "·" || ch === "-") {
+      width += 5;
+    } else if (ch === "(" || ch === ")") {
+      width += 4.5;
+    } else if (ch === "." || ch === ":" || ch === ",") {
+      width += 4;
+    } else if (ch === " ") {
+      width += 4;
+    } else if (ch === "i" || ch === "l" || ch === "j" || ch === "I") {
+      width += 3.5;
+    } else if (ch === "f" || ch === "r" || ch === "t") {
+      width += 5;
+    } else if (ch === "m" || ch === "w" || ch === "M" || ch === "W") {
+      width += 11.6;
+    } else if (ch >= "a" && ch <= "z") {
+      width += 7.8;
+    } else if (ch >= "A" && ch <= "Z") {
+      width += 9.4;
+    } else {
+      width += 8.4;
+    }
+  }
+  return round1(width);
+};
 var formatAisModelValueLabel = (model) => {
   const acct = `${model.available_accounts}/${model.eligible_accounts}号`;
   const remReq = `${model.effective_remaining_requests}次`;
-  const remTok = formatTokens(model.effective_remaining_tokens);
   const pct = formatPercent(model.effective_percent);
+  if (isRequestsOnlyAisModel(model)) {
+    return `${acct} · ${pct} · 剩${remReq}`;
+  }
+  const remTok = formatTokens(model.effective_remaining_tokens);
   return `${acct} · ${pct} · 剩${remReq}/${remTok}`;
 };
 var formatAisModelCompactValueLabel = (model) => {
-  if (model.eligible_accounts <= 0) {
-    return "0/0号";
+  const modelKey = model.id || model.label || "";
+  const idLen = modelKey.length;
+  const elig = Math.max(0, Math.round(model.eligible_accounts || 0));
+  const avail = Math.max(0, Math.round(model.available_accounts || 0));
+  const rawLeftPx = estimateMobileTextWidthPx(`${modelKey} · 每日`);
+  const leftWidthPx = Math.max(rawLeftPx, idLen >= 27 ? 215 : idLen >= 22 ? 192 : 0);
+  const budgetPx = MOBILE_COMPACT_ROW_MAX_PX - MOBILE_COMPACT_GAP_PX - leftWidthPx;
+  const pickFitting = (candidates) => {
+    for (const candidate of candidates) {
+      if (estimateMobileTextWidthPx(candidate) <= budgetPx) {
+        return candidate;
+      }
+    }
+    return candidates[candidates.length - 1];
+  };
+  if (elig <= 0) {
+    return pickFitting(["0/0号", "0/0"]);
   }
-  if (model.available_accounts <= 0) {
-    return `0/${model.eligible_accounts}号 · 耗尽`;
+  if (avail <= 0) {
+    if (idLen > 20) {
+      return "耗尽";
+    }
+    return pickFitting([`0/${elig}·耗尽`, "耗尽"]);
   }
-  if (model.available_accounts < model.eligible_accounts) {
-    return `${model.available_accounts}/${model.eligible_accounts}号 · ${formatPercent(model.effective_percent)}`;
+  if (avail < elig) {
+    const pct = `${Math.round(clampPercent(model.effective_percent))}%`;
+    if (idLen > 22) {
+      return pickFitting([`${pct}·${avail}`, `${avail}/${elig}`, pct]);
+    }
+    return pickFitting([`${avail}/${elig}·${pct}`, `${pct}·${avail}`, `${avail}/${elig}`, pct]);
   }
   return null;
 };
@@ -823,7 +885,11 @@ var shortModelLabel = (model) => {
     "gemini-4-argon": "AIS Argon",
     "gemini-4-hydrogen": "AIS Hydrogen",
     "gemini-3.1-pro-preview": "AIS 3.1 Pro",
-    "gemini-3.8-flash": "AIS 3.8 Flash"
+    "gemini-3.8-flash": "AIS 3.8 Flash",
+    "gemini-nano-banana-2.1": "AIS Banana 2.1",
+    "gemini-3-pro-image": "AIS Banana Pro",
+    "gemini-3.1-flash-image": "AIS Banana 2",
+    "gemini-3.1-flash-lite-image": "AIS Banana Lite"
   };
   return map[model.id] ?? truncate(`AIS ${model.label || model.id}`, 40);
 };
@@ -969,6 +1035,7 @@ var buildStatusView = (snapshot, history, cfg) => {
       for (const model of picked.slice(0, maxAisRows)) {
         const rem = clampPercent(model.effective_percent);
         const tone = model.available_accounts === 0 ? "error" : toneForRemaining(rem);
+        const remDetail = isRequestsOnlyAisModel(model) ? (model.used_tokens ?? 0) > 0 ? `剩 ${model.effective_remaining_requests}次 · 已耗 ${formatTokens(model.used_tokens)} tok` : `剩 ${model.effective_remaining_requests}次` : `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)} tok`;
         pushRow({
           kind: "line",
           id: `ais-${toKebabId(model.id, "model")}`,
@@ -976,7 +1043,7 @@ var buildStatusView = (snapshot, history, cfg) => {
           content: { kind: "bar", value: rem, tone },
           value: truncate(`${model.available_accounts}/${model.eligible_accounts}号 · ${formatPercent(rem)}`, 80),
           valueTone: tone === "success" ? "default" : tone,
-          tooltip: truncate(`${model.label}: 可用 ${model.available_accounts}/${model.eligible_accounts} 号 · 剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)} tok · 重置 ${formatCountdown(snapshot.aistudio.next_reset_ms)}`, 200)
+          tooltip: truncate(`${model.label}: 可用 ${model.available_accounts}/${model.eligible_accounts} 号 · ${remDetail} · 重置 ${formatCountdown(snapshot.aistudio.next_reset_ms)}`, 200)
         });
       }
       for (const m of allModels) {

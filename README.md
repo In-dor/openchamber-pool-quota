@@ -1,15 +1,15 @@
 # openchamber-pool-quota
 
-将 **[Pool Status Board](https://github.com/In-dor/pool-status-board)**（Antigravity 4 窗口 + AIStudio2API 10 模型双号池只读看板）无缝接入 **OpenChamber** 与 **OpenCode V2 终端 TUI** 的双端一体化插件，全程 **0 LLM Token 消耗、毫秒级响应**。
+将 **[Pool Status Board](https://github.com/In-dor/pool-status-board)**（Antigravity 4 窗口 + AIStudio2API 14 模型双号池只读看板，含 4 个 Nano Banana 画图模型及纯按次计额支持）无缝接入 **OpenChamber** 与 **OpenCode V2 终端 TUI** 的双端一体化插件，全程 **0 LLM Token 消耗、毫秒级响应**。
 
 ## 功能亮点
 
 - **OpenChamber 一张原生总卡（`ext-pool-quota`）**：通过官方 `service.provides: ["quota"]` 接入，自动覆盖 **Settings → Usage 页面、Work Status 用量区、手机端右上角浮层（含桌面小组件）与桌面端系统托盘**；默认开启「紧凑配额文案（适配手机端）」避免窄屏叠字，也可在侧边栏面板按需切回详版。
 - **可选开关显示 AIS 号池**：
-  - **开启时**：总卡展示 Antigravity 4 窗口（剩余%、本轮已用 `$` / 满额预测 `$`、重置倒计时）+ AIStudio 汇总窗口 + 全部 10 个 AIStudio 模型分模型余量（可在 Usage 页按需勾选置顶模型）。
+  - **开启时**：总卡展示 Antigravity 4 窗口（剩余%、本轮已用 `$` / 满额预测 `$`、重置倒计时）+ AIStudio 汇总窗口 + 全部 14 个 AIStudio 模型分模型余量（含 4 个纯按次计额的 Nano Banana 画图模型，可在 Usage 页按需勾选置顶模型）。
   - **关闭时**：总卡瞬间精简为纯 Antigravity 4 窗口视图。
   - 在 OpenChamber 侧边栏 `Pool Quota` 面板、Work Status 区块，或 OpenCode TUI `/quota` 弹窗按 `a` 均可一键实时切换，配置双端互通。
-- **Work Status 实时卡片 & 侧边栏面板（支持手机端）**：内置 `5h / 7d` 周期剩余趋势曲线、10 模型短板瓶颈标识，以及看板地址 & 口令配置表单。
+- **Work Status 实时卡片 & 侧边栏面板（支持手机端）**：内置 `5h / 7d` 周期剩余趋势曲线、14 模型短板瓶颈 / 按次计额标识（自动折叠 100% 满血模型），以及看板地址 & 口令配置表单。
 - **OpenCode V2 终端 TUI 原生支持**：
   - 底栏常驻实时简报（开启 AIS 且当前选中 AIS 模型时，自动高亮当前模型剩余%与可用号数）。
   - 零 Token 交互式 `/quota`（别名 `/pool`）面板：按 `a` 切换 AIS 显示、按 `r` 立即刷新、按 `s` 引导配置看板地址与访问口令。

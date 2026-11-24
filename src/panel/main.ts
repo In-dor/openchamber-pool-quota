@@ -22,6 +22,7 @@ import {
   formatTokens,
   formatUsd,
   isBottleneckTokens,
+  isRequestsOnlyAisModel,
 } from '../shared/format.ts';
 import type {
   AIStudioModelSummary,
@@ -98,7 +99,7 @@ const isActiveAisModel = (model: AIStudioModelSummary): boolean => {
   const rem = clampPercent(model.effective_percent);
   if (rem < 99.95) return true;
   if (model.eligible_accounts > 0 && model.available_accounts < model.eligible_accounts) return true;
-  return model.used_requests > 0 || model.used_tokens > 0;
+  return (model.used_requests ?? 0) > 0 || (model.used_tokens ?? 0) > 0;
 };
 
 const seriesColorVar = (key: string, group?: string): string => {
@@ -549,6 +550,12 @@ const injectStyles = (): void => {
       background: var(--pq-full-bg);
       color: var(--pq-full);
       border-color: color-mix(in srgb, var(--pq-full) 28%, transparent);
+    }
+
+    .pq-pill-mode {
+      background: color-mix(in srgb, var(--pq-border) 38%, transparent);
+      color: var(--pq-muted);
+      border-color: color-mix(in srgb, var(--pq-border) 65%, transparent);
     }
 
     .pq-pill-empty {
@@ -2515,6 +2522,7 @@ const renderAgCard = (snapshot: BoardSnapshot, disposers: Array<() => void>): HT
 const renderAisModelRow = (model: AIStudioModelSummary, compactFull = false): HTMLElement => {
   const rem = clampPercent(model.effective_percent);
   const exhausted = model.eligible_accounts > 0 && model.available_accounts === 0;
+  const requestsOnly = isRequestsOnlyAisModel(model);
   const lv = healthLevelFor(rem, exhausted);
 
   const row = el(
@@ -2528,13 +2536,21 @@ const renderAisModelRow = (model: AIStudioModelSummary, compactFull = false): HT
   const right = el('div', 'pq-model-right');
   if (exhausted) {
     right.appendChild(el('span', 'pq-pill pq-pill-empty', '已耗尽'));
-  } else if (!compactFull && model.eligible_accounts > 0 && (rem < 99.5 || model.used_requests > 0 || model.used_tokens > 0)) {
-    const tokShort = isBottleneckTokens(model);
-    right.appendChild(el(
-      'span',
-      `pq-pill ${tokShort ? 'pq-bottleneck-tok' : 'pq-bottleneck-req'}`,
-      tokShort ? 'Token 短板' : '次数短板',
-    ));
+  } else if (
+    !compactFull
+    && model.eligible_accounts > 0
+    && (rem < 99.5 || (model.used_requests ?? 0) > 0 || (model.used_tokens ?? 0) > 0)
+  ) {
+    if (requestsOnly) {
+      right.appendChild(el('span', 'pq-pill pq-pill-mode', '按次计额'));
+    } else {
+      const tokShort = isBottleneckTokens(model);
+      right.appendChild(el(
+        'span',
+        `pq-pill ${tokShort ? 'pq-bottleneck-tok' : 'pq-bottleneck-req'}`,
+        tokShort ? 'Token 短板' : '次数短板',
+      ));
+    }
   }
   right.appendChild(el('span', `pq-win-val pq-lv-${lv}`, formatPercent(rem)));
   top.appendChild(right);
@@ -2551,7 +2567,12 @@ const renderAisModelRow = (model: AIStudioModelSummary, compactFull = false): HT
     ? `可用 ${model.available_accounts}/${model.eligible_accounts} 号 · ${model.cooling_accounts} 冷却`
     : `可用 ${model.available_accounts}/${model.eligible_accounts} 号`;
   sub.appendChild(el('span', 'pq-mono', acctText));
-  sub.appendChild(el('span', 'pq-mono', `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)}`));
+  const remText = requestsOnly
+    ? ((model.used_tokens ?? 0) > 0
+      ? `剩 ${model.effective_remaining_requests}次 · 已耗 ${formatTokens(model.used_tokens)} tok`
+      : `剩 ${model.effective_remaining_requests}次`)
+    : `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)}`;
+  sub.appendChild(el('span', 'pq-mono', remText));
   row.appendChild(sub);
 
   return row;

@@ -356,15 +356,22 @@ function summarizeSnapshot(snap, cfg, options = {}) {
       playground_requests: ais.playground?.requests ?? 0,
       ...(includeModels
         ? {
-          models: aisModels.map((m) => ({
-            id: m.id,
-            label: m.label,
-            available_accounts: m.available_accounts,
-            eligible_accounts: m.eligible_accounts,
-            effective_percent: clampPct(m.effective_percent),
-            remaining_requests: m.effective_remaining_requests,
-            remaining_tokens: fmtTokens(m.effective_remaining_tokens),
-          })),
+          models: aisModels.map((m) => {
+            const limitTokens = Number(m.limit_tokens ?? 0);
+            const requestsOnly = !Number.isFinite(limitTokens) || limitTokens <= 0;
+            return {
+              id: m.id,
+              label: m.label,
+              ...(typeof m.category === "string" && m.category ? { category: m.category } : {}),
+              available_accounts: m.available_accounts,
+              eligible_accounts: m.eligible_accounts,
+              effective_percent: clampPct(m.effective_percent),
+              remaining_requests: m.effective_remaining_requests,
+              remaining_tokens: requestsOnly ? null : fmtTokens(m.effective_remaining_tokens),
+              used_tokens: fmtTokens(m.used_tokens ?? 0),
+              quota_mode: requestsOnly ? "requests_only" : "requests_and_tokens",
+            };
+          }),
         }
         : {}),
     };
@@ -407,7 +414,7 @@ export default {
       editor.add({
         name: "pool_quota",
         description:
-          "Query real-time Antigravity (4 windows: remaining %, optional live burn estimate, current/forecast or previous-cycle reference USD cost, reset countdown) and AIStudio2API (10 models: available accounts, remaining requests/tokens, bottleneck %) quotas from Pool Status Board.",
+          "Query real-time Antigravity (4 windows: remaining %, optional live burn estimate, current/forecast or previous-cycle reference USD cost, reset countdown) and AIStudio2API (all configured Playground models including Gemini 4, 3.x, and Nano Banana image models: available accounts, remaining requests/tokens or requests-only quota, effective %) quotas from Pool Status Board.",
         input: {
           type: "object",
           properties: {
@@ -418,7 +425,7 @@ export default {
             },
             include_models: {
               type: "boolean",
-              description: "Include all 10 AIStudio models in the JSON payload (default: true).",
+              description: "Include all configured AIStudio Playground models (Gemini 4, 3.x, and Nano Banana image models) in the JSON payload (default: true).",
             },
             refresh: {
               type: "boolean",

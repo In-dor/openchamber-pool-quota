@@ -13,6 +13,7 @@ import {
   formatSampleFreshness,
   formatTokens,
   formatUsd,
+  isRequestsOnlyAisModel,
   toneForRemaining,
   truncate,
 } from '../shared/format.ts';
@@ -50,6 +51,10 @@ const shortModelLabel = (model: AIStudioModelSummary): string => {
     'gemini-4-hydrogen': 'AIS Hydrogen',
     'gemini-3.1-pro-preview': 'AIS 3.1 Pro',
     'gemini-3.8-flash': 'AIS 3.8 Flash',
+    'gemini-nano-banana-2.1': 'AIS Banana 2.1',
+    'gemini-3-pro-image': 'AIS Banana Pro',
+    'gemini-3.1-flash-image': 'AIS Banana 2',
+    'gemini-3.1-flash-lite-image': 'AIS Banana Lite',
   };
   return map[model.id] ?? truncate(`AIS ${model.label || model.id}`, 40);
 };
@@ -229,6 +234,11 @@ export const buildStatusView = (
       for (const model of picked.slice(0, maxAisRows)) {
         const rem = clampPercent(model.effective_percent);
         const tone = model.available_accounts === 0 ? 'error' : toneForRemaining(rem);
+        const remDetail = isRequestsOnlyAisModel(model)
+          ? ((model.used_tokens ?? 0) > 0
+            ? `剩 ${model.effective_remaining_requests}次 · 已耗 ${formatTokens(model.used_tokens)} tok`
+            : `剩 ${model.effective_remaining_requests}次`)
+          : `剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)} tok`;
         pushRow({
           kind: 'line',
           id: `ais-${toKebabId(model.id, 'model')}`,
@@ -240,7 +250,7 @@ export const buildStatusView = (
           ),
           valueTone: tone === 'success' ? 'default' : tone,
           tooltip: truncate(
-            `${model.label}: 可用 ${model.available_accounts}/${model.eligible_accounts} 号 · 剩 ${model.effective_remaining_requests}次 / ${formatTokens(model.effective_remaining_tokens)} tok · 重置 ${formatCountdown(snapshot.aistudio.next_reset_ms)}`,
+            `${model.label}: 可用 ${model.available_accounts}/${model.eligible_accounts} 号 · ${remDetail} · 重置 ${formatCountdown(snapshot.aistudio.next_reset_ms)}`,
             200,
           ),
         });
