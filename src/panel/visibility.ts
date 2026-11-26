@@ -43,6 +43,7 @@ export interface PanelVisibilityTrackerOptions {
   IntersectionObserverCtor?: IntersectionObserverCtorLike | null;
   ResizeObserverCtor?: ResizeObserverCtorLike | null;
   onBecomeVisible?: () => void;
+  onBecomeHidden?: () => void;
 }
 
 export interface PanelVisibilityTracker {
@@ -87,9 +88,12 @@ export const createPanelVisibilityTracker = (
   const evaluate = (): boolean => {
     const nowVisible = isVisible();
     const becameVisible = !wasVisible && nowVisible;
+    const becameHidden = wasVisible && !nowVisible;
     wasVisible = nowVisible;
     if (becameVisible) {
       options.onBecomeVisible?.();
+    } else if (becameHidden) {
+      options.onBecomeHidden?.();
     }
     return nowVisible;
   };

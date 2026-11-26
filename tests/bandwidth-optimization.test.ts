@@ -662,6 +662,7 @@ describe('iframe 3-layer PanelVisibilityTracker', () => {
     }
 
     let becomeVisibleCount = 0;
+    let becomeHiddenCount = 0;
     const tracker = createPanelVisibilityTracker({
       doc: {
         get visibilityState() { return visibilityState; },
@@ -678,12 +679,14 @@ describe('iframe 3-layer PanelVisibilityTracker', () => {
       IntersectionObserverCtor: MockIO,
       ResizeObserverCtor: MockRO,
       onBecomeVisible: () => { becomeVisibleCount += 1; },
+      onBecomeHidden: () => { becomeHiddenCount += 1; },
     });
 
     // Starts visible (default intersecting = true so first paint is never blocked)
     expect(ioOptionsCaptured).toEqual({ root: null, threshold: 0.01 });
     expect(tracker.isVisible()).toBe(true);
     expect(becomeVisibleCount).toBe(0);
+    expect(becomeHiddenCount).toBe(0);
 
     // 1. Desktop display:none -> 0x0 viewport
     innerWidth = 0;
@@ -691,6 +694,7 @@ describe('iframe 3-layer PanelVisibilityTracker', () => {
     roCb?.();
     expect(tracker.isVisible()).toBe(false);
     expect(becomeVisibleCount).toBe(0);
+    expect(becomeHiddenCount).toBe(1);
 
     // Restore desktop sidebar -> triggers onBecomeVisible once
     innerWidth = 320;
@@ -698,25 +702,30 @@ describe('iframe 3-layer PanelVisibilityTracker', () => {
     resizeCb?.();
     expect(tracker.isVisible()).toBe(true);
     expect(becomeVisibleCount).toBe(1);
+    expect(becomeHiddenCount).toBe(1);
 
     // 2. Mobile drawer closed (translateX(100%)) -> IO isIntersecting = false while visibilityState stays 'visible'
     ioCb?.([{ isIntersecting: false }]);
     expect(tracker.isVisible()).toBe(false);
     expect(becomeVisibleCount).toBe(1);
+    expect(becomeHiddenCount).toBe(2);
 
     // Reopen mobile drawer -> IO isIntersecting = true triggers immediate sync
     ioCb?.([{ isIntersecting: true }]);
     expect(tracker.isVisible()).toBe(true);
     expect(becomeVisibleCount).toBe(2);
+    expect(becomeHiddenCount).toBe(2);
 
     // 3. Background browser tab -> visibilityState = 'hidden'
     visibilityState = 'hidden';
     visCb?.();
     expect(tracker.isVisible()).toBe(false);
+    expect(becomeHiddenCount).toBe(3);
     visibilityState = 'visible';
     visCb?.();
     expect(tracker.isVisible()).toBe(true);
     expect(becomeVisibleCount).toBe(3);
+    expect(becomeHiddenCount).toBe(3);
 
     // Duplicate visible event does not double-fire
     resizeCb?.();
@@ -1028,12 +1037,12 @@ describe('upstream clients (?view=compact / ?view=tui, If-None-Match -> 304, leg
 });
 
 describe('manifest invariants & lossless panel CSS minification', () => {
-  it('keeps Work Status interval at 15000ms and version at 1.3.2', () => {
+  it('keeps Work Status interval at 15000ms and version at 1.3.3', () => {
     const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       version: string;
       openchamber: { contributes: { statusSection: { source: { interval: number } } } };
     };
-    expect(pkg.version).toBe('1.3.2');
+    expect(pkg.version).toBe('1.3.3');
     expect(pkg.openchamber.contributes.statusSection.source.interval).toBe(15_000);
   });
 

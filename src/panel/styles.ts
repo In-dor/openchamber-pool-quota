@@ -57,6 +57,13 @@ export const PANEL_CSS = `
       --pq-series-claude: #9333ea;
       --pq-series-claude-2: #ec4899;
       --pq-series-argon: #d97706;
+
+      /* Popover tooltip (Light) */
+      --pq-accent: var(--pq-primary);
+      --pq-tip-bg: var(--oc-elevated, var(--surface-elevated, #ffffff));
+      --pq-tip-fg: var(--pq-fg);
+      --pq-tip-border: var(--oc-sdk-float-edge, color-mix(in srgb, var(--pq-border) 90%, rgba(15, 23, 42, 0.16)));
+      --pq-tip-shadow: var(--oc-sdk-float, 0 8px 24px -4px rgba(15, 23, 42, 0.16), 0 2px 6px -1px rgba(15, 23, 42, 0.08));
     }
 
     :root[data-oc-theme="dark"] {
@@ -110,6 +117,13 @@ export const PANEL_CSS = `
       --pq-series-claude: #c084fc;
       --pq-series-claude-2: #f472b6;
       --pq-series-argon: #fbbf24;
+
+      /* Popover tooltip (Dark) */
+      --pq-accent: var(--pq-full);
+      --pq-tip-bg: var(--oc-elevated, var(--surface-elevated, #1e293b));
+      --pq-tip-fg: var(--pq-fg);
+      --pq-tip-border: var(--oc-sdk-float-edge, color-mix(in srgb, var(--pq-border) 95%, rgba(255, 255, 255, 0.14)));
+      --pq-tip-shadow: var(--oc-sdk-float, 0 10px 26px -4px rgba(0, 0, 0, 0.52), 0 3px 8px -2px rgba(0, 0, 0, 0.36));
     }
 
     @media (prefers-color-scheme: dark) {
@@ -134,6 +148,11 @@ export const PANEL_CSS = `
         --pq-series-claude: #c084fc;
         --pq-series-claude-2: #f472b6;
         --pq-series-argon: #fbbf24;
+        --pq-accent: var(--pq-full);
+        --pq-tip-bg: var(--oc-elevated, var(--surface-elevated, #1e293b));
+        --pq-tip-fg: var(--pq-fg);
+        --pq-tip-border: var(--oc-sdk-float-edge, color-mix(in srgb, var(--pq-border) 95%, rgba(255, 255, 255, 0.14)));
+        --pq-tip-shadow: var(--oc-sdk-float, 0 10px 26px -4px rgba(0, 0, 0, 0.52), 0 3px 8px -2px rgba(0, 0, 0, 0.36));
       }
     }
 
@@ -1127,6 +1146,115 @@ export const PANEL_CSS = `
       justify-content: space-between;
       gap: 6px;
       flex-wrap: wrap;
+    }
+
+    /* Touch Tap + Desktop Hover Popover Tooltip */
+    [data-pq-tip] {
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      transition: box-shadow 0.14s ease, border-color 0.14s ease;
+    }
+
+    [data-pq-tip].is-tip-open {
+      box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--pq-accent, #38bdf8) 55%, transparent);
+    }
+
+    .pq-tip-inline {
+      border-radius: 4px;
+      padding: 0 2px;
+      margin: 0 -2px;
+    }
+
+    .pq-win-est[data-pq-tip] {
+      border-radius: 5px;
+      padding: 4px 4px 2px;
+      margin: 0 -4px -2px;
+    }
+
+    .pq-pop-tip {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 120;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      width: max-content;
+      max-width: min(296px, calc(100vw - 16px));
+      padding: 7px 10px;
+      border-radius: 9px;
+      border: 1px solid var(--pq-tip-border);
+      background: var(--pq-tip-bg);
+      color: var(--pq-tip-fg);
+      box-shadow: var(--pq-tip-shadow);
+      font-size: 11.5px;
+      line-height: 1.45;
+      pointer-events: none;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+
+    .pq-pop-tip[hidden] {
+      display: none;
+    }
+
+    .pq-pop-tip.is-pinned {
+      pointer-events: auto;
+    }
+
+    .pq-pop-tip-content {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .pq-pop-tip-title {
+      font-weight: 700;
+      font-size: 0.96em;
+      color: var(--pq-accent, var(--pq-fg));
+      line-height: 1.35;
+    }
+
+    .pq-pop-tip-title[hidden] {
+      display: none;
+    }
+
+    .pq-pop-tip-body {
+      color: var(--pq-tip-fg);
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .pq-pop-tip-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      margin: -1px -3px 0 0;
+      padding: 0;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--pq-border) 80%, transparent);
+      background: var(--pq-surface-2);
+      color: var(--pq-muted);
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .pq-pop-tip-close:hover {
+      background: var(--pq-hover);
+      color: var(--pq-fg);
+    }
+
+    .pq-pop-tip:not(.is-pinned) .pq-pop-tip-close {
+      display: none;
     }
 
     @media (max-width: 260px) {

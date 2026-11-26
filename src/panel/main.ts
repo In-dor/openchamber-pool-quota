@@ -37,6 +37,7 @@ import type {
   PanelStateResponse,
 } from '../shared/types.ts';
 import { syncHistoryEstimatedPointsFromSnapshot } from './history-sync.ts';
+import { bindPopTip, createPopTipController, type PopTipController } from './pop-tip.ts';
 import { PANEL_CSS } from './styles.ts';
 import { createPanelVisibilityTracker, type PanelVisibilityTracker } from './visibility.ts';
 
@@ -309,6 +310,7 @@ let showAisSwitchHandle: CheckboxHandle | null = null;
 let compactSwitchHandle: CheckboxHandle | null = null;
 let autoRefreshTimer: number | null = null;
 let visibilityTracker: PanelVisibilityTracker | null = null;
+const popTip: PopTipController = createPopTipController();
 
 const getAccountWindow = (accountId: string): HistoryWindowKind => (
   accountHistoryWindow.get(accountId) ?? '5h'
@@ -340,6 +342,8 @@ document.addEventListener('pointerdown', (e) => {
   const target = e.target as Element | null;
   if (!target?.closest('.pq-chart-box')) {
     clearAllScrubs();
+  } else {
+    popTip.hide();
   }
 });
 
@@ -1107,6 +1111,7 @@ const mountChartContent = (
 const renderRecent200mStrip = (
   history: PanelAntigravityAccountHistory | undefined,
   snapshotMs: number,
+  accountId: string,
 ): HTMLElement | null => {
   if (!history) return null;
 
@@ -1233,10 +1238,14 @@ const renderRecent200mStrip = (
           ? 'is-cache-mid'
           : 'is-cache-low';
       const capsule = el('span', `pq-rate-capsule pq-mono ${cacheCls}`, formatPercent(r));
-      capsule.title = buildCacheTooltip({
-        rate: r,
-        rate24h: history.cache_hit_rate_24h,
-        savedCost: history.cache_saved_cost,
+      bindPopTip(capsule, {
+        id: `ag-fallback-${accountId}`,
+        title: '缓存效率',
+        text: buildCacheTooltip({
+          rate: r,
+          rate24h: history.cache_hit_rate_24h,
+          savedCost: history.cache_saved_cost,
+        }),
       });
       top.appendChild(capsule);
       strip.appendChild(top);
@@ -1249,7 +1258,13 @@ const renderRecent200mStrip = (
       top.appendChild(el('span', 'pq-recent-label', '历史成功率'));
       const r = history.success_rate;
       const rateCls = r >= 95 ? 'is-high' : r >= 80 ? 'is-med' : 'is-low';
-      top.appendChild(el('span', `pq-rate-capsule pq-mono ${rateCls}`, formatPercent(r)));
+      const capsule = el('span', `pq-rate-capsule pq-mono ${rateCls}`, formatPercent(r));
+      bindPopTip(capsule, {
+        id: `ag-fallback-${accountId}`,
+        title: '历史成功率',
+        text: `历史请求累计成功率 ${formatPercent(r)}`,
+      });
+      top.appendChild(capsule);
       strip.appendChild(top);
       return strip;
     }
@@ -1260,7 +1275,7 @@ const renderRecent200mStrip = (
 
 // ---------- Antigravity Card ----------
 
-const renderAgWindowActive = (win: PanelAntigravityWindow): HTMLElement => {
+const renderAgWindowActive = (win: PanelAntigravityWindow, accountId: string): HTMLElement => {
   const rem = clampPercent(win.remaining_percent);
   const lv = healthLevelFor(rem);
   const box = el('div', `pq-win-active${lv === 'empty' ? ' is-empty' : ''}`);
@@ -1277,7 +1292,11 @@ const renderAgWindowActive = (win: PanelAntigravityWindow): HTMLElement => {
     const ageEl = el('span', `pq-sample-age pq-num${win.stale ? ' is-stale' : ''}`, freshness);
     const obsMs = toMs(win.observed_at_ms);
     ageEl.dataset.pqObservedMs = String(obsMs);
-    ageEl.title = `真实采样时间：${new Date(obsMs).toLocaleTimeString()}`;
+    bindPopTip(ageEl, {
+      id: `ag-win-age-${accountId}-${win.key}`,
+      title: '真实采样时间',
+      text: `${win.label || win.key} 最近权威采样：${new Date(obsMs).toLocaleTimeString()}${win.stale ? '（已过期，待采样）' : ''}`,
+    });
     nameWrap.appendChild(ageEl);
   }
   top.appendChild(nameWrap);
@@ -1304,8 +1323,13 @@ const renderAgWindowActive = (win: PanelAntigravityWindow): HTMLElement => {
     usageWrap.appendChild(el('span', '', parts.join(' / ')));
     if (win.has_forecast && win.forecast_cost > 0) {
       const tag = forecastLabelFor(win.forecast_basis, true);
-      const forecastEl = el('span', '', `· ${tag} ${formatUsd(win.forecast_cost)}`);
-      forecastEl.title = `${forecastLabelFor(win.forecast_basis, false)} ${formatUsd(win.forecast_cost)}`;
+      const fullForecastLabel = forecastLabelFor(win.forecast_basis, false);
+      const forecastEl = el('span', 'pq-tip-inline', `· ${tag} ${formatUsd(win.forecast_cost)}`);
+      bindPopTip(forecastEl, {
+        id: `ag-win-forecast-${accountId}-${win.key}`,
+        title: fullForecastLabel,
+        text: `${fullForecastLabel} ${formatUsd(win.forecast_cost)}（本窗已用 ${formatUsd(win.current_cost)}）`,
+      });
       usageWrap.appendChild(forecastEl);
     }
   } else if (win.has_forecast && win.forecast_cost > 0) {
@@ -1350,7 +1374,11 @@ const renderAgWindowActive = (win: PanelAntigravityWindow): HTMLElement => {
       const deltaEl = el('span', 'pq-est-delta pq-mono', `采样后 ${postParts.join(' · ')}`);
       estRow.appendChild(deltaEl);
     }
-    estRow.title = `基于采样后实时用量推算（权威采样值仍为 ${formatPercent(rem)}）`;
+    bindPopTip(estRow, {
+      id: `ag-win-est-${accountId}-${win.key}`,
+      title: '采样后实时推算',
+      text: `基于采样后实时用量推算约剩 ${estRem.toFixed(1)}%（权威采样值仍为 ${formatPercent(rem)}）`,
+    });
     box.appendChild(estRow);
   }
 
@@ -1414,10 +1442,14 @@ const renderAgAccountBlock = (
       `pq-pill pq-num pq-pill-cache ${cacheRateTierClass(h.cache_hit_rate)}`,
       `缓存 ${formatPercent(h.cache_hit_rate)}`,
     );
-    cachePill.title = buildCacheTooltip({
-      rate: h.cache_hit_rate,
-      rate24h: h.cache_hit_rate_24h,
-      savedCost: h.cache_saved_cost,
+    bindPopTip(cachePill, {
+      id: `ag-cache-${acct.id}`,
+      title: '缓存效率',
+      text: buildCacheTooltip({
+        rate: h.cache_hit_rate,
+        rate24h: h.cache_hit_rate_24h,
+        savedCost: h.cache_saved_cost,
+      }),
     });
     badges.appendChild(cachePill);
   }
@@ -1427,7 +1459,7 @@ const renderAgAccountBlock = (
   block.appendChild(head);
 
   // Recent 200m success rate capsule / micro-bar
-  const recentStrip = renderRecent200mStrip(acct.history, snapshotMs);
+  const recentStrip = renderRecent200mStrip(acct.history, snapshotMs, acct.id);
   if (recentStrip) {
     block.appendChild(recentStrip);
   }
@@ -1445,7 +1477,7 @@ const renderAgAccountBlock = (
   if (activeWins.length > 0) {
     const activeList = el('div', 'pq-win-list');
     for (const w of activeWins) {
-      activeList.appendChild(renderAgWindowActive(w));
+      activeList.appendChild(renderAgWindowActive(w, acct.id));
     }
     block.appendChild(activeList);
   }
@@ -1528,11 +1560,15 @@ const renderAgCard = (snapshot: PanelBoardSnapshot, disposers: Array<() => void>
         `pq-pill pq-num pq-pill-cache ${cacheRateTierClass(ag.summary.weighted_cache_hit_rate)}`,
         `缓存 ${formatPercent(ag.summary.weighted_cache_hit_rate)}`,
       );
-      poolCachePill.title = buildCacheTooltip({
-        prefix: '号池加权缓存命中率',
-        rate: ag.summary.weighted_cache_hit_rate,
-        rate24h: ag.summary.weighted_cache_hit_rate_24h,
-        savedCost: ag.summary.total_cache_saved_cost,
+      bindPopTip(poolCachePill, {
+        id: 'ag-pool-cache',
+        title: '号池缓存效率',
+        text: buildCacheTooltip({
+          prefix: '号池加权缓存命中率',
+          rate: ag.summary.weighted_cache_hit_rate,
+          rate24h: ag.summary.weighted_cache_hit_rate_24h,
+          savedCost: ag.summary.total_cache_saved_cost,
+        }),
       });
       headLeft.appendChild(poolCachePill);
     }
@@ -1912,6 +1948,7 @@ const refreshLiveTimeElements = (fetchedAtMs: number): void => {
       node.textContent = text;
     }
   }
+  popTip.reposition();
 };
 
 const refreshAdditionalAccountHistories = (snapshot: PanelBoardSnapshot, force: boolean): void => {
@@ -2358,9 +2395,11 @@ const render = (): void => {
   disposeList(prevDisposers);
   oldClearers.clear();
   renderSettingsCardContent(nextSettingsCard);
+  popTip.markRenderSyncing();
   root.replaceChildren(wrap);
 
   restoreScroll(savedScroll);
+  popTip.syncAfterRender(root);
 };
 
 // ---------- Silent Visibility-Aware Auto-Refresh ----------
@@ -2398,6 +2437,9 @@ const startSilentAutoRefresh = (): void => {
           resetAutoRefreshTimer();
           void loadState(false, hasSuccess);
         }
+      },
+      onBecomeHidden: () => {
+        popTip.hide();
       },
     });
   }
