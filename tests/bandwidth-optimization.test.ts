@@ -147,6 +147,9 @@ const buildHeavyRawSnapshot = (nowMs = 1_764_100_000_000): BoardSnapshot & Recor
         total_tokens: 99_000_000,
         total_cost: 42.5,
         weighted_success_rate: 99.1,
+        weighted_cache_hit_rate: 88.4,
+        weighted_cache_hit_rate_24h: 91.6,
+        total_cache_saved_cost: 24_500.75,
         window_averages: [
           { key: 'gemini_5h', label: 'Gemini 5h', avg_remaining_percent: 82, account_count: 2 },
         ],
@@ -175,6 +178,14 @@ const buildHeavyRawSnapshot = (nowMs = 1_764_100_000_000): BoardSnapshot & Recor
             total_tokens: 50_000_000,
             total_cost: 20,
             success_rate: 99,
+            input_tokens: 1_234_567_890,
+            cached_tokens: 1_108_642_000,
+            cache_hit_rate: 89.8,
+            cache_saved_cost: 20_120.5,
+            input_tokens_24h: 123_456_789,
+            cached_tokens_24h: 115_061_727,
+            cache_hit_rate_24h: 93.2,
+            cache_saved_cost_24h: 1_850.25,
             latest_request_at_ms: nowMs - 10_000,
             has_recent_buckets: true,
             recent_window_minutes: 200,
@@ -370,14 +381,26 @@ describe('whitelist DTO projection (projectPanelSnapshot & projectPanelHistory)'
     expect('cpamp_status' in projectedOn.antigravity).toBe(false);
     expect('window_averages' in projectedOn.antigravity.summary).toBe(false);
 
-    // Account 1: keeps recent_buckets, strips recent_bars & trend_24h, preserves all forecast & live estimate fields + Argon Pro window
+    // Account 1: keeps recent_buckets & lean cache fields, strips recent_bars, trend_24h & heavy token counts
     const acct1 = projectedOn.antigravity.accounts[0]!;
     expect(acct1.tier).toBe('Pro');
     expect('trend_24h' in acct1).toBe(false);
     expect(acct1.history?.has_recent_buckets).toBe(true);
     expect(acct1.history?.recent_buckets).toHaveLength(20);
+    expect(acct1.history?.cache_hit_rate).toBe(89.8);
+    expect(acct1.history?.cache_hit_rate_24h).toBe(93.2);
+    expect(acct1.history?.cache_saved_cost).toBe(20_120.5);
     expect('recent_bars' in (acct1.history ?? {})).toBe(false);
     expect('total_requests' in (acct1.history ?? {})).toBe(false);
+    expect('success_rate' in (acct1.history ?? {})).toBe(false);
+    expect('input_tokens' in (acct1.history ?? {})).toBe(false);
+    expect('cached_tokens' in (acct1.history ?? {})).toBe(false);
+    expect('input_tokens_24h' in (acct1.history ?? {})).toBe(false);
+    expect('cached_tokens_24h' in (acct1.history ?? {})).toBe(false);
+    expect('cache_saved_cost_24h' in (acct1.history ?? {})).toBe(false);
+    expect(projectedOn.antigravity.summary.weighted_cache_hit_rate).toBe(88.4);
+    expect(projectedOn.antigravity.summary.weighted_cache_hit_rate_24h).toBe(91.6);
+    expect(projectedOn.antigravity.summary.total_cache_saved_cost).toBe(24_500.75);
 
     const g5 = acct1.windows.find((w) => w.key === 'gemini_5h')!;
     expect(g5.has_current_usage).toBe(true);
@@ -1005,12 +1028,12 @@ describe('upstream clients (?view=compact / ?view=tui, If-None-Match -> 304, leg
 });
 
 describe('manifest invariants & lossless panel CSS minification', () => {
-  it('keeps Work Status interval at 15000ms and version at 1.3.1', () => {
+  it('keeps Work Status interval at 15000ms and version at 1.3.2', () => {
     const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       version: string;
       openchamber: { contributes: { statusSection: { source: { interval: number } } } };
     };
-    expect(pkg.version).toBe('1.3.1');
+    expect(pkg.version).toBe('1.3.2');
     expect(pkg.openchamber.contributes.statusSection.source.interval).toBe(15_000);
   });
 

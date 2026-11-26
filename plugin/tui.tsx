@@ -58,10 +58,23 @@ type Snapshot = {
     online: boolean;
     status?: string;
     status_message?: string;
-    summary?: { active_accounts?: number };
+    summary?: {
+      active_accounts?: number;
+      weighted_cache_hit_rate?: number | null;
+      weighted_cache_hit_rate_24h?: number | null;
+      total_cache_saved_cost?: number;
+    };
     accounts?: Array<{
       id: string;
       code_name: string;
+      cache_hit_rate?: number | null;
+      cache_hit_rate_24h?: number | null;
+      cache_saved_cost?: number;
+      history?: {
+        cache_hit_rate?: number | null;
+        cache_hit_rate_24h?: number | null;
+        cache_saved_cost?: number;
+      };
       windows: AgWindow[];
     }>;
   };
@@ -214,6 +227,61 @@ function fmtUsd(value: number): string {
   if (value >= 100) return `$${Math.round(value)}`;
   if (value >= 10) return `$${value.toFixed(1)}`;
   return `$${value.toFixed(2)}`;
+}
+
+function fmtCompactUsd(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "$0";
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 100_000) return `$${Math.round(value / 1_000)}k`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}k`;
+  return fmtUsd(value);
+}
+
+function isFiniteNum(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function formatAgDialogHeader(ag?: Snapshot["antigravity"]): string {
+  if (!ag?.online) {
+    return "Antigravity (离线)";
+  }
+  const activeCount = ag.summary?.active_accounts ?? ag.accounts?.length ?? 0;
+  const isMulti = (ag.accounts?.length ?? 0) > 1 || activeCount > 1;
+  const primary = ag.accounts?.[0];
+
+  const acctRate = isFiniteNum(primary?.cache_hit_rate)
+    ? primary.cache_hit_rate
+    : (isFiniteNum(primary?.history?.cache_hit_rate) ? primary.history.cache_hit_rate : null);
+  const acctRate24h = isFiniteNum(primary?.cache_hit_rate_24h)
+    ? primary.cache_hit_rate_24h
+    : (isFiniteNum(primary?.history?.cache_hit_rate_24h) ? primary.history.cache_hit_rate_24h : null);
+  const acctSaved = isFiniteNum(primary?.cache_saved_cost) && primary.cache_saved_cost > 0
+    ? primary.cache_saved_cost
+    : (isFiniteNum(primary?.history?.cache_saved_cost) && primary.history.cache_saved_cost > 0
+      ? primary.history.cache_saved_cost
+      : null);
+
+  const sumRate = isFiniteNum(ag.summary?.weighted_cache_hit_rate)
+    ? ag.summary.weighted_cache_hit_rate
+    : null;
+  const sumRate24h = isFiniteNum(ag.summary?.weighted_cache_hit_rate_24h)
+    ? ag.summary.weighted_cache_hit_rate_24h
+    : null;
+
+  const cacheRate = isMulti ? (sumRate ?? acctRate) : (acctRate ?? sumRate);
+  const cacheRate24h = isMulti ? (sumRate24h ?? acctRate24h) : (acctRate24h ?? sumRate24h);
+
+  const parts: string[] = [`${activeCount}号在线`];
+  if (cacheRate !== null) {
+    parts.push(`缓存 ${fmtPct(cacheRate)}`);
+    if (cacheRate24h !== null) {
+      parts.push(`24h ${fmtPct(cacheRate24h)}`);
+    }
+    if (!isMulti && acctSaved !== null) {
+      parts.push(`省${fmtCompactUsd(acctSaved)}`);
+    }
+  }
+  return `Antigravity (${parts.join(" · ")})`;
 }
 
 function fmtTokens(tokens: number): string {
@@ -634,7 +702,7 @@ export default Plugin.define({
             {(snap) => (
               <box flexDirection="column" gap={1}>
                 <text fg={context.theme.text.muted}>
-                  Antigravity ({snap().antigravity?.online ? `${snap().antigravity?.summary?.active_accounts ?? 0}号在线` : "离线"})
+                  {formatAgDialogHeader(snap().antigravity)}
                 </text>
                 <For each={agWindows()}>
                   {(w) => {

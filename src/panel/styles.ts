@@ -371,6 +371,28 @@ export const PANEL_CSS = `
       border-color: color-mix(in srgb, var(--pq-empty-bar) 40%, transparent);
     }
 
+    .pq-pill-cache {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pq-pill-cache.is-high {
+      background: var(--pq-healthy-bg);
+      color: var(--pq-healthy);
+      border-color: color-mix(in srgb, var(--pq-healthy) 26%, transparent);
+    }
+
+    .pq-pill-cache.is-mid {
+      background: var(--pq-full-bg);
+      color: var(--pq-full);
+      border-color: color-mix(in srgb, var(--pq-full) 26%, transparent);
+    }
+
+    .pq-pill-cache.is-low {
+      background: var(--pq-surface-2);
+      color: var(--pq-muted);
+      border-color: color-mix(in srgb, var(--pq-border) 70%, transparent);
+    }
+
     /* 5-Level Health Colors */
     .pq-lv-full { color: var(--pq-full); }
     .pq-lv-healthy { color: var(--pq-healthy); }
@@ -426,7 +448,8 @@ export const PANEL_CSS = `
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 6px;
+      gap: 4px 6px;
+      flex-wrap: wrap;
       min-width: 0;
     }
 
@@ -435,7 +458,18 @@ export const PANEL_CSS = `
       align-items: center;
       gap: 6px;
       min-width: 0;
-      flex: 1 1 auto;
+      flex: 1 1 100px;
+    }
+
+    .pq-acct-badges {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      margin-left: auto;
+      flex-shrink: 0;
+      max-width: 100%;
     }
 
     .pq-acct-name {
@@ -503,6 +537,9 @@ export const PANEL_CSS = `
     .pq-rate-capsule.is-high { background: var(--pq-healthy-bg); color: var(--pq-healthy); }
     .pq-rate-capsule.is-med { background: var(--pq-moderate-bg); color: var(--pq-moderate); }
     .pq-rate-capsule.is-low { background: var(--pq-low-bg); color: var(--pq-low); }
+    .pq-rate-capsule.is-cache-high { background: var(--pq-healthy-bg); color: var(--pq-healthy); }
+    .pq-rate-capsule.is-cache-mid { background: var(--pq-full-bg); color: var(--pq-full); }
+    .pq-rate-capsule.is-cache-low { background: var(--pq-surface-2); color: var(--pq-muted); }
 
     .pq-buckets {
       display: flex;

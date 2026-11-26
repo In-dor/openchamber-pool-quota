@@ -558,9 +558,16 @@ var fetchAntigravityHistory = async (cfg, params) => {
 // src/service/panel-projection.ts
 import crypto2 from "node:crypto";
 var shortHash = (payload) => crypto2.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+var isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+var isPositiveFinite = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
 var projectAccountHistory = (h) => {
   if (!h)
     return;
+  const cacheFields = {
+    ...isFiniteNumber(h.cache_hit_rate) ? { cache_hit_rate: h.cache_hit_rate } : {},
+    ...isFiniteNumber(h.cache_hit_rate_24h) ? { cache_hit_rate_24h: h.cache_hit_rate_24h } : {},
+    ...isPositiveFinite(h.cache_saved_cost) ? { cache_saved_cost: h.cache_saved_cost } : {}
+  };
   if (h.has_recent_buckets && Array.isArray(h.recent_buckets) && h.recent_buckets.length > 0) {
     return {
       has_recent_buckets: true,
@@ -572,20 +579,25 @@ var projectAccountHistory = (h) => {
         ...b.time ? { time: b.time } : {},
         success: b.success || 0,
         failed: b.failed || 0
-      }))
+      })),
+      ...cacheFields
     };
   }
   if (Array.isArray(h.recent_bars) && h.recent_bars.length > 0) {
     return {
       has_recent_buckets: false,
       recent_success_rate: h.recent_success_rate ?? null,
-      recent_bars: h.recent_bars.map((b) => ({ ok: Boolean(b.ok) }))
+      recent_bars: h.recent_bars.map((b) => ({ ok: Boolean(b.ok) })),
+      ...cacheFields
     };
   }
-  if (h.available && h.success_rate != null) {
+  const hasCacheRate = isFiniteNumber(h.cache_hit_rate);
+  const hasSuccessRate = isFiniteNumber(h.success_rate);
+  if (h.available && (hasCacheRate || hasSuccessRate)) {
     return {
       available: true,
-      success_rate: h.success_rate
+      ...cacheFields,
+      ...hasSuccessRate ? { success_rate: h.success_rate } : {}
     };
   }
   return;
@@ -640,6 +652,11 @@ var projectPanelSnapshot = (snap, cfg) => {
     };
   });
   const sortedTiers = projectedAccounts.length > 1 ? sortRecordKeys(ag?.summary?.tier_counts) : undefined;
+  const multiSummaryCache = projectedAccounts.length > 1 ? {
+    ...isFiniteNumber(ag?.summary?.weighted_cache_hit_rate) ? { weighted_cache_hit_rate: ag.summary.weighted_cache_hit_rate } : {},
+    ...isFiniteNumber(ag?.summary?.weighted_cache_hit_rate_24h) ? { weighted_cache_hit_rate_24h: ag.summary.weighted_cache_hit_rate_24h } : {},
+    ...isPositiveFinite(ag?.summary?.total_cache_saved_cost) ? { total_cache_saved_cost: ag.summary.total_cache_saved_cost } : {}
+  } : {};
   const projectedAis = cfg.showAis ? {
     online: Boolean(ais?.online),
     status: ais?.status || "unknown",
@@ -683,7 +700,8 @@ var projectPanelSnapshot = (snap, cfg) => {
       ...ag?.status_message ? { status_message: ag.status_message } : {},
       summary: {
         active_accounts: ag?.summary?.active_accounts ?? projectedAccounts.length,
-        ...sortedTiers ? { tier_counts: sortedTiers } : {}
+        ...sortedTiers ? { tier_counts: sortedTiers } : {},
+        ...multiSummaryCache
       },
       accounts: projectedAccounts
     },

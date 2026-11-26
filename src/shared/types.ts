@@ -63,6 +63,14 @@ export interface AntigravityAccountHistory {
   total_tokens: number;
   total_cost: number;
   success_rate: number | null;
+  input_tokens?: number;
+  cached_tokens?: number;
+  cache_hit_rate?: number | null;
+  cache_saved_cost?: number;
+  input_tokens_24h?: number;
+  cached_tokens_24h?: number;
+  cache_hit_rate_24h?: number | null;
+  cache_saved_cost_24h?: number;
   latest_request_at_ms?: number;
   has_recent_buckets: boolean;
   recent_window_minutes: number;
@@ -109,6 +117,9 @@ export interface AntigravityPool {
     total_tokens: number;
     total_cost: number;
     weighted_success_rate: number | null;
+    weighted_cache_hit_rate?: number | null;
+    weighted_cache_hit_rate_24h?: number | null;
+    total_cache_saved_cost?: number;
     window_averages: AntigravityWindowAverage[];
   };
   accounts: AntigravityAccount[];
@@ -231,6 +242,9 @@ export interface PanelAntigravityWindow {
 export interface PanelAntigravityAccountHistory {
   available?: boolean;
   success_rate?: number | null;
+  cache_hit_rate?: number | null;
+  cache_hit_rate_24h?: number | null;
+  cache_saved_cost?: number;
   has_recent_buckets?: boolean;
   recent_window_minutes?: number;
   recent_window_success?: number;
@@ -259,6 +273,9 @@ export interface PanelAntigravityPool {
   summary: {
     active_accounts: number;
     tier_counts?: Record<string, number>;
+    weighted_cache_hit_rate?: number | null;
+    weighted_cache_hit_rate_24h?: number | null;
+    total_cache_saved_cost?: number;
   };
   accounts: PanelAntigravityAccount[];
 }

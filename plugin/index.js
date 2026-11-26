@@ -344,10 +344,30 @@ function summarizeSnapshot(snap, cfg, options = {}) {
   };
 
   if (includeAg) {
+    const finiteOrNull = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const posFiniteOrNull = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+    const activeAccounts = ag.summary?.active_accounts ?? ag.accounts?.length ?? 0;
+    const isMulti = (Array.isArray(ag.accounts) && ag.accounts.length > 1) || activeAccounts > 1;
+
+    const primaryCacheRate = finiteOrNull(primary?.history?.cache_hit_rate) ?? finiteOrNull(primary?.cache_hit_rate);
+    const primaryCacheRate24h = finiteOrNull(primary?.history?.cache_hit_rate_24h) ?? finiteOrNull(primary?.cache_hit_rate_24h);
+    const primarySavedCost = posFiniteOrNull(primary?.history?.cache_saved_cost) ?? posFiniteOrNull(primary?.cache_saved_cost);
+
+    const summaryCacheRate = finiteOrNull(ag.summary?.weighted_cache_hit_rate);
+    const summaryCacheRate24h = finiteOrNull(ag.summary?.weighted_cache_hit_rate_24h);
+    const summarySavedCost = posFiniteOrNull(ag.summary?.total_cache_saved_cost);
+
+    const cacheHitRate = isMulti ? (summaryCacheRate ?? primaryCacheRate) : (primaryCacheRate ?? summaryCacheRate);
+    const cacheHitRate24h = isMulti ? (summaryCacheRate24h ?? primaryCacheRate24h) : (primaryCacheRate24h ?? summaryCacheRate24h);
+    const cacheSavedCost = isMulti ? (summarySavedCost ?? primarySavedCost) : (primarySavedCost ?? summarySavedCost);
+
     payload.antigravity = {
       online: Boolean(ag.online),
       status: ag.status || "unknown",
-      active_accounts: ag.summary?.active_accounts ?? ag.accounts?.length ?? 0,
+      active_accounts: activeAccounts,
+      ...(cacheHitRate !== null ? { cache_hit_rate_percent: clampPct(cacheHitRate) } : {}),
+      ...(cacheHitRate24h !== null ? { cache_hit_rate_24h_percent: clampPct(cacheHitRate24h) } : {}),
+      ...(cacheSavedCost !== null ? { cache_saved_cost_usd: cacheSavedCost } : {}),
       windows: agWindows.map((w) => {
         const rem = clampPct(w.remaining_percent);
         const estRem = typeof w.estimated_remaining_percent === "number" && Number.isFinite(w.estimated_remaining_percent)
@@ -449,7 +469,7 @@ export default {
       editor.add({
         name: "pool_quota",
         description:
-          "Query real-time Antigravity (4 windows: remaining %, optional live burn estimate, current/forecast or previous-cycle reference USD cost, reset countdown) and AIStudio2API (all configured Playground models including Gemini 4, 3.x, and Nano Banana image models: available accounts, remaining requests/tokens or requests-only quota, effective %) quotas from Pool Status Board.",
+          "Query real-time Antigravity (4 windows: remaining %, optional live burn estimate, current/forecast or previous-cycle reference USD cost, reset countdown, and optional cache hit rate / saved cost) and AIStudio2API (all configured Playground models including Gemini 4, 3.x, and Nano Banana image models: available accounts, remaining requests/tokens or requests-only quota, effective %) quotas from Pool Status Board.",
         input: {
           type: "object",
           properties: {

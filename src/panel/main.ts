@@ -153,6 +153,29 @@ const accountStatusClass = (status: string): string => {
   }
 };
 
+const cacheRateTierClass = (rate: number): 'is-high' | 'is-mid' | 'is-low' => {
+  const clamped = clampPercent(rate);
+  if (clamped >= 80) return 'is-high';
+  if (clamped >= 50) return 'is-mid';
+  return 'is-low';
+};
+
+const buildCacheTooltip = (opts: {
+  rate: number;
+  rate24h?: number | null;
+  savedCost?: number;
+  prefix?: string;
+}): string => {
+  const parts = [`${opts.prefix ?? '累计缓存命中率'} ${formatPercent(opts.rate)}`];
+  if (typeof opts.rate24h === 'number' && Number.isFinite(opts.rate24h)) {
+    parts.push(`近 24h ${formatPercent(opts.rate24h)}`);
+  }
+  if (typeof opts.savedCost === 'number' && Number.isFinite(opts.savedCost) && opts.savedCost > 0) {
+    parts.push(`缓存约省 ${formatUsd(opts.savedCost)}`);
+  }
+  return parts.join(' · ');
+};
+
 const rateToRgb = (rate: number): string => {
   const t = Math.max(0, Math.min(1, rate));
   const seg = t < 0.5 ? 0 : 1;
@@ -1197,15 +1220,39 @@ const renderRecent200mStrip = (
     return strip;
   }
 
-  if (history.available && history.success_rate != null) {
-    const strip = el('div', 'pq-recent-strip');
-    const top = el('div', 'pq-recent-top');
-    top.appendChild(el('span', 'pq-recent-label', '历史成功率'));
-    const r = history.success_rate;
-    const rateCls = r >= 95 ? 'is-high' : r >= 80 ? 'is-med' : 'is-low';
-    top.appendChild(el('span', `pq-rate-capsule pq-mono ${rateCls}`, formatPercent(r)));
-    strip.appendChild(top);
-    return strip;
+  if (history.available) {
+    if (typeof history.cache_hit_rate === 'number' && Number.isFinite(history.cache_hit_rate)) {
+      const strip = el('div', 'pq-recent-strip');
+      const top = el('div', 'pq-recent-top');
+      top.appendChild(el('span', 'pq-recent-label', '累计缓存命中'));
+      const r = history.cache_hit_rate;
+      const tier = cacheRateTierClass(r);
+      const cacheCls = tier === 'is-high'
+        ? 'is-cache-high'
+        : tier === 'is-mid'
+          ? 'is-cache-mid'
+          : 'is-cache-low';
+      const capsule = el('span', `pq-rate-capsule pq-mono ${cacheCls}`, formatPercent(r));
+      capsule.title = buildCacheTooltip({
+        rate: r,
+        rate24h: history.cache_hit_rate_24h,
+        savedCost: history.cache_saved_cost,
+      });
+      top.appendChild(capsule);
+      strip.appendChild(top);
+      return strip;
+    }
+
+    if (typeof history.success_rate === 'number' && Number.isFinite(history.success_rate)) {
+      const strip = el('div', 'pq-recent-strip');
+      const top = el('div', 'pq-recent-top');
+      top.appendChild(el('span', 'pq-recent-label', '历史成功率'));
+      const r = history.success_rate;
+      const rateCls = r >= 95 ? 'is-high' : r >= 80 ? 'is-med' : 'is-low';
+      top.appendChild(el('span', `pq-rate-capsule pq-mono ${rateCls}`, formatPercent(r)));
+      strip.appendChild(top);
+      return strip;
+    }
   }
 
   return null;
@@ -1359,8 +1406,24 @@ const renderAgAccountBlock = (
   }
   head.appendChild(idGroup);
 
+  const badges = el('div', 'pq-acct-badges');
+  const h = acct.history;
+  if (h && typeof h.cache_hit_rate === 'number' && Number.isFinite(h.cache_hit_rate)) {
+    const cachePill = el(
+      'span',
+      `pq-pill pq-num pq-pill-cache ${cacheRateTierClass(h.cache_hit_rate)}`,
+      `缓存 ${formatPercent(h.cache_hit_rate)}`,
+    );
+    cachePill.title = buildCacheTooltip({
+      rate: h.cache_hit_rate,
+      rate24h: h.cache_hit_rate_24h,
+      savedCost: h.cache_saved_cost,
+    });
+    badges.appendChild(cachePill);
+  }
   const statusText = acct.status_label || (acct.status === 'available' ? '可用' : acct.status || '未知');
-  head.appendChild(el('span', `pq-pill ${accountStatusClass(acct.status)}`, statusText));
+  badges.appendChild(el('span', `pq-pill ${accountStatusClass(acct.status)}`, statusText));
+  head.appendChild(badges);
   block.appendChild(head);
 
   // Recent 200m success rate capsule / micro-bar
@@ -1446,13 +1509,32 @@ const renderAgCard = (snapshot: PanelBoardSnapshot, disposers: Array<() => void>
   const headLeft = el('div', 'pq-card-head-left');
   headLeft.appendChild(el('h4', 'pq-card-title', 'Antigravity 号池'));
 
-  // Show compact tier summary pills when multi-account pool is active
-  if (ag.online && ag.accounts.length > 1 && ag.summary?.tier_counts) {
-    for (const tierName of ['Ultra', 'Pro', 'Free']) {
-      const cnt = ag.summary.tier_counts[tierName] ?? 0;
-      if (cnt > 0) {
-        headLeft.appendChild(el('span', `pq-pill pq-num ${tierClass(tierName)}`, `${tierName}×${cnt}`));
+  // Show compact tier summary pills & weighted cache pill when multi-account pool is active
+  if (ag.online && ag.accounts.length > 1) {
+    if (ag.summary?.tier_counts) {
+      for (const tierName of ['Ultra', 'Pro', 'Free']) {
+        const cnt = ag.summary.tier_counts[tierName] ?? 0;
+        if (cnt > 0) {
+          headLeft.appendChild(el('span', `pq-pill pq-num ${tierClass(tierName)}`, `${tierName}×${cnt}`));
+        }
       }
+    }
+    if (
+      typeof ag.summary?.weighted_cache_hit_rate === 'number'
+      && Number.isFinite(ag.summary.weighted_cache_hit_rate)
+    ) {
+      const poolCachePill = el(
+        'span',
+        `pq-pill pq-num pq-pill-cache ${cacheRateTierClass(ag.summary.weighted_cache_hit_rate)}`,
+        `缓存 ${formatPercent(ag.summary.weighted_cache_hit_rate)}`,
+      );
+      poolCachePill.title = buildCacheTooltip({
+        prefix: '号池加权缓存命中率',
+        rate: ag.summary.weighted_cache_hit_rate,
+        rate24h: ag.summary.weighted_cache_hit_rate_24h,
+        savedCost: ag.summary.total_cache_saved_cost,
+      });
+      headLeft.appendChild(poolCachePill);
     }
   }
   head.appendChild(headLeft);
