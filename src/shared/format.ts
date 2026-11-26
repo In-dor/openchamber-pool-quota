@@ -197,7 +197,12 @@ export const formatAisModelCompactValueLabel = (model: AIStudioModelSummary): st
   return null;
 };
 
-export const isBottleneckTokens = (model: AIStudioModelSummary): boolean => {
+export const isBottleneckTokens = (
+  model: Pick<
+    AIStudioModelSummary,
+    'limit_requests' | 'effective_remaining_requests' | 'limit_tokens' | 'effective_remaining_tokens'
+  >,
+): boolean => {
   if (isRequestsOnlyAisModel(model)) return false;
   const reqPct = model.limit_requests > 0 ? (model.effective_remaining_requests / model.limit_requests) * 100 : 100;
   const tokPct = (model.effective_remaining_tokens / model.limit_tokens) * 100;

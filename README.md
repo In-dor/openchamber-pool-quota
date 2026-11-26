@@ -10,6 +10,10 @@
   - **关闭时**：总卡瞬间精简为纯 Antigravity 4 窗口视图。
   - 在 OpenChamber 侧边栏 `Pool Quota` 面板、Work Status 区块，或 OpenCode TUI `/quota` 弹窗按 `a` 均可一键实时切换，配置双端互通。
 - **Work Status 实时卡片 & 侧边栏面板（支持手机端）**：内置 `5h / 7d` 周期剩余趋势曲线、14 模型短板瓶颈 / 按次计额标识（自动折叠 100% 满血模型），以及看板地址 & 口令配置表单。
+- **全端省流优化（保留 15s 实时体验）**：
+  - 侧边栏面板集成三层可见性检测（`visibilityState` + 非零视口尺寸 + 顶层视口 `IntersectionObserver`），桌面端隐藏侧栏或手机端收起抽屉时完全暂停后台轮询，重新打开瞬间立即同步最新额度。
+  - 扩展服务内置严格白名单 DTO 裁剪与 `?rev` / `?hrev` 增量同步协商：数据未变时仅回传约 `120 B` 轻量确认（零 DOM 重绘，原地刷新倒计时），历史曲线未变时跳过曲线点集重传并在前端实时同步虚线估算点。
+  - 扩展服务、OpenCode Server 插件与 TUI 分别按需请求 `?view=compact` / `?view=tui` 并支持 `If-None-Match` → `304 Not Modified` 零正文复用，同时 100% 向后兼容未升级的旧版 Pool Status Board。
 - **OpenCode V2 终端 TUI 原生支持**：
   - 底栏常驻实时简报（开启 AIS 且当前选中 AIS 模型时，自动高亮当前模型剩余%与可用号数）。
   - 零 Token 交互式 `/quota`（别名 `/pool`）面板：按 `a` 切换 AIS 显示、按 `r` 立即刷新、按 `s` 引导配置看板地址与访问口令。

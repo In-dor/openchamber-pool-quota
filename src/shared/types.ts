@@ -207,11 +207,153 @@ export interface AntigravityHistoryResponse {
   series: AntigravityHistorySeries[];
 }
 
-export interface PanelStateResponse {
+export interface PanelAntigravityWindow {
+  key: string;
+  label: string;
+  group: string;
+  remaining_percent: number;
+  reset_at_ms: number;
+  observed_at_ms: number;
+  stale: boolean;
+  has_current_usage: boolean;
+  current_requests: number;
+  current_tokens: number;
+  current_cost: number;
+  has_forecast: boolean;
+  forecast_basis?: string;
+  forecast_cost: number;
+  post_sample_cost_usd?: number;
+  post_sample_tokens?: number;
+  post_sample_requests?: number;
+  estimated_remaining_percent?: number | null;
+}
+
+export interface PanelAntigravityAccountHistory {
+  available?: boolean;
+  success_rate?: number | null;
+  has_recent_buckets?: boolean;
+  recent_window_minutes?: number;
+  recent_window_success?: number;
+  recent_window_failure?: number;
+  recent_window_rate?: number | null;
+  recent_buckets?: AntigravityRecentBucket[];
+  recent_success_rate?: number | null;
+  recent_bars?: Array<{ ok: boolean }>;
+}
+
+export interface PanelAntigravityAccount {
+  id: string;
+  code_name: string;
+  tier: string;
+  status: string;
+  status_label: string;
+  history?: PanelAntigravityAccountHistory;
+  windows: PanelAntigravityWindow[];
+  has_history: boolean;
+}
+
+export interface PanelAntigravityPool {
+  online: boolean;
+  status: string;
+  status_message?: string;
+  summary: {
+    active_accounts: number;
+    tier_counts?: Record<string, number>;
+  };
+  accounts: PanelAntigravityAccount[];
+}
+
+export interface PanelAIStudioModelSummary {
+  id: string;
+  label: string;
+  eligible_accounts: number;
+  available_accounts: number;
+  cooling_accounts: number;
+  limit_requests: number;
+  used_requests: number;
+  effective_remaining_requests: number;
+  limit_tokens: number;
+  used_tokens: number;
+  effective_remaining_tokens: number;
+  effective_percent: number;
+}
+
+export interface PanelAIStudioPool {
+  online: boolean;
+  status: string;
+  status_message?: string;
+  next_reset_ms?: number;
+  account_counts: {
+    enabled: number;
+    ready: number;
+  };
+  playground?: {
+    requests: number;
+  };
+  models?: PanelAIStudioModelSummary[];
+}
+
+export interface PanelBoardSnapshot {
+  generated_at_ms: number;
+  antigravity: PanelAntigravityPool;
+  aistudio: PanelAIStudioPool;
+}
+
+export interface PanelHistorySeries {
+  key: string;
+  group: string;
+  label: string;
+  remaining: number;
+  points: Array<[number, number]>;
+  resets?: Array<[number, number]>;
+  cycle_resets?: number[];
+  estimated_point?: [number, number] | null;
+}
+
+export interface PanelAntigravityHistoryResponse {
+  account_id: string;
+  window: string;
+  range: string;
+  to_sec?: number;
+  series: PanelHistorySeries[];
+}
+
+export interface PanelStateUnchangedResponse {
+  ok: true;
+  unchanged: true;
+  rev: string;
+  hrev?: string;
+  generatedAtMs: number;
+  fetchedAtMs: number;
+}
+
+export interface PanelStateDataResponse {
+  ok?: true;
+  unchanged?: false;
+  rev?: string;
+  hrev?: string;
+  historyUnchanged?: boolean;
   config: PublicPoolQuotaConfig;
-  snapshot: BoardSnapshot | null;
-  history: AntigravityHistoryResponse | null;
+  snapshot: PanelBoardSnapshot | null;
+  history?: PanelAntigravityHistoryResponse | null;
   error: string | null;
   errorCode: 'unauthorized' | 'unreachable' | 'http' | 'invalid' | null;
   fetchedAtMs: number;
 }
+
+export type PanelStateResponse = PanelStateUnchangedResponse | PanelStateDataResponse;
+
+export interface PanelHistoryUnchangedResponse {
+  ok: true;
+  unchanged: true;
+  hrev: string;
+  toSec?: number;
+}
+
+export interface PanelHistoryDataResponse extends PanelAntigravityHistoryResponse {
+  ok?: true;
+  unchanged?: false;
+  hrev?: string;
+}
+
+export type PanelHistoryResponse = PanelHistoryUnchangedResponse | PanelHistoryDataResponse;

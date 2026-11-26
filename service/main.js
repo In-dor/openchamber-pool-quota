@@ -364,6 +364,7 @@ var toPublicConfig = (cfg) => ({
 });
 
 // src/service/client.ts
+import crypto from "node:crypto";
 var SNAPSHOT_TTL_MS = 8000;
 var HISTORY_TTL_MS = 20000;
 var REQUEST_TIMEOUT_MS = 1e4;
@@ -374,30 +375,42 @@ var clearBoardCache = () => {
   snapshotCache = null;
   historyCache.clear();
 };
-var cacheKeyOf = (cfg) => `${cfg.url}|${cfg.passcode.length > 0 ? "auth" : "open"}`;
-var buildHeaders = (cfg) => {
+var passcodeFingerprint = (passcode) => passcode.length > 0 ? crypto.createHash("sha256").update(passcode).digest("hex").slice(0, 8) : "open";
+var cacheKeyOf = (cfg) => `${cfg.url}|${passcodeFingerprint(cfg.passcode)}`;
+var buildHeaders = (cfg, etag) => {
   const headers = {
     Accept: "application/json"
   };
   if (cfg.passcode) {
     headers["X-View-Passcode"] = cfg.passcode;
   }
+  if (etag) {
+    headers["If-None-Match"] = etag;
+  }
   return headers;
+};
+var parsePositiveHeaderInt = (res, headerName) => {
+  const raw = res.headers.get(headerName);
+  if (raw === null)
+    return null;
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 };
 var fetchBoardSnapshot = async (cfg, options = {}) => {
   const now = Date.now();
   const key = cacheKeyOf(cfg);
   const bypassCache = Boolean(options.force || options.fresh);
   const useFresh = options.fresh ?? Boolean(options.force);
-  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
-    return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
+  const cached = snapshotCache && snapshotCache.key === key ? snapshotCache : null;
+  if (!bypassCache && cached && now - cached.fetchedAtMs < SNAPSHOT_TTL_MS) {
+    return { ok: true, data: cached.data, fetchedAtMs: cached.fetchedAtMs };
   }
-  const snapshotUrl = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
+  const snapshotUrl = useFresh ? `${cfg.url}/api/snapshot?view=compact&fresh=1` : `${cfg.url}/api/snapshot?view=compact`;
   let response;
   try {
     response = await fetch(snapshotUrl, {
       method: "GET",
-      headers: buildHeaders(cfg),
+      headers: buildHeaders(cfg, cached?.etag),
       signal: AbortSignal.timeout(options.timeoutMs ?? (useFresh ? FRESH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS))
     });
   } catch (err) {
@@ -410,6 +423,9 @@ var fetchBoardSnapshot = async (cfg, options = {}) => {
     };
   }
   if (response.status === 401 || response.status === 403) {
+    if (snapshotCache?.key === key) {
+      snapshotCache = null;
+    }
     return {
       ok: false,
       code: "unauthorized",
@@ -417,6 +433,17 @@ var fetchBoardSnapshot = async (cfg, options = {}) => {
       message: cfg.passcode ? "访问口令不正确，请在左侧 Pool Quota 面板重新填写访问口令。" : "看板已开启口令保护，请打开左侧 Pool Quota 面板填写访问口令。",
       fetchedAtMs: Date.now()
     };
+  }
+  if (response.status === 304 && cached) {
+    const cloned = structuredClone(cached.data);
+    const headerGenMs = parsePositiveHeaderInt(response, "X-Generated-At-Ms");
+    if (headerGenMs !== null) {
+      cloned.generated_at_ms = headerGenMs;
+    }
+    const nextEtag = response.headers.get("ETag")?.trim() || cached.etag;
+    const fetchedAtMs2 = Date.now();
+    snapshotCache = { key, fetchedAtMs: fetchedAtMs2, data: cloned, etag: nextEtag };
+    return { ok: true, data: cloned, fetchedAtMs: fetchedAtMs2 };
   }
   if (!response.ok) {
     return {
@@ -448,7 +475,8 @@ var fetchBoardSnapshot = async (cfg, options = {}) => {
   }
   const data = parsed;
   const fetchedAtMs = Date.now();
-  snapshotCache = { key, fetchedAtMs, data };
+  const etag = response.headers.get("ETag")?.trim() || undefined;
+  snapshotCache = { key, fetchedAtMs, data, etag };
   return { ok: true, data, fetchedAtMs };
 };
 var fetchAntigravityHistory = async (cfg, params) => {
@@ -469,7 +497,7 @@ var fetchAntigravityHistory = async (cfg, params) => {
   try {
     response = await fetch(`${cfg.url}/api/antigravity/history?${query.toString()}`, {
       method: "GET",
-      headers: buildHeaders(cfg),
+      headers: buildHeaders(cfg, cached?.etag),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
   } catch (err) {
@@ -482,6 +510,7 @@ var fetchAntigravityHistory = async (cfg, params) => {
     };
   }
   if (response.status === 401 || response.status === 403) {
+    historyCache.delete(key);
     return {
       ok: false,
       code: "unauthorized",
@@ -489,6 +518,17 @@ var fetchAntigravityHistory = async (cfg, params) => {
       message: "历史曲线接口需要有效访问口令。",
       fetchedAtMs: Date.now()
     };
+  }
+  if (response.status === 304 && cached) {
+    const cloned = structuredClone(cached.data);
+    const headerToSec = parsePositiveHeaderInt(response, "X-History-To-Sec");
+    if (headerToSec !== null) {
+      cloned.to_sec = headerToSec;
+    }
+    const nextEtag = response.headers.get("ETag")?.trim() || cached.etag;
+    const fetchedAtMs = Date.now();
+    historyCache.set(key, { fetchedAtMs, data: cloned, etag: nextEtag });
+    return { ok: true, data: cloned, fetchedAtMs };
   }
   if (!response.ok) {
     return {
@@ -502,7 +542,8 @@ var fetchAntigravityHistory = async (cfg, params) => {
   try {
     const data = await response.json();
     const fetchedAtMs = Date.now();
-    historyCache.set(key, { fetchedAtMs, data });
+    const etag = response.headers.get("ETag")?.trim() || undefined;
+    historyCache.set(key, { fetchedAtMs, data, etag });
     return { ok: true, data, fetchedAtMs };
   } catch {
     return {
@@ -512,6 +553,249 @@ var fetchAntigravityHistory = async (cfg, params) => {
       fetchedAtMs: Date.now()
     };
   }
+};
+
+// src/service/panel-projection.ts
+import crypto2 from "node:crypto";
+var shortHash = (payload) => crypto2.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+var projectAccountHistory = (h) => {
+  if (!h)
+    return;
+  if (h.has_recent_buckets && Array.isArray(h.recent_buckets) && h.recent_buckets.length > 0) {
+    return {
+      has_recent_buckets: true,
+      recent_window_minutes: h.recent_window_minutes || 200,
+      recent_window_success: h.recent_window_success || 0,
+      recent_window_failure: h.recent_window_failure || 0,
+      recent_window_rate: h.recent_window_rate ?? null,
+      recent_buckets: h.recent_buckets.map((b) => ({
+        ...b.time ? { time: b.time } : {},
+        success: b.success || 0,
+        failed: b.failed || 0
+      }))
+    };
+  }
+  if (Array.isArray(h.recent_bars) && h.recent_bars.length > 0) {
+    return {
+      has_recent_buckets: false,
+      recent_success_rate: h.recent_success_rate ?? null,
+      recent_bars: h.recent_bars.map((b) => ({ ok: Boolean(b.ok) }))
+    };
+  }
+  if (h.available && h.success_rate != null) {
+    return {
+      available: true,
+      success_rate: h.success_rate
+    };
+  }
+  return;
+};
+var sortRecordKeys = (input) => {
+  if (!input || typeof input !== "object")
+    return;
+  const entries = Object.entries(input).filter(([, count]) => typeof count === "number" && Number.isFinite(count) && count > 0).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0)
+    return;
+  const out = {};
+  for (const [k, v] of entries) {
+    out[k] = v;
+  }
+  return out;
+};
+var projectPanelSnapshot = (snap, cfg) => {
+  const ag = snap.antigravity;
+  const ais = snap.aistudio;
+  const rawAccounts = Array.isArray(ag?.accounts) ? ag.accounts : [];
+  const projectedAccounts = rawAccounts.map((acct) => {
+    const projectedHistory = projectAccountHistory(acct.history);
+    const projectedWindows = (Array.isArray(acct.windows) ? acct.windows : []).map((w) => ({
+      key: w.key,
+      label: w.label,
+      group: w.group,
+      remaining_percent: w.remaining_percent,
+      reset_at_ms: w.reset_at_ms,
+      observed_at_ms: w.observed_at_ms,
+      stale: Boolean(w.stale),
+      has_current_usage: Boolean(w.has_current_usage),
+      current_requests: w.current_requests ?? 0,
+      current_tokens: w.current_tokens ?? 0,
+      current_cost: w.current_cost ?? 0,
+      has_forecast: Boolean(w.has_forecast),
+      ...w.forecast_basis ? { forecast_basis: w.forecast_basis } : {},
+      forecast_cost: w.forecast_cost ?? 0,
+      ...typeof w.post_sample_cost_usd === "number" && Number.isFinite(w.post_sample_cost_usd) && w.post_sample_cost_usd > 0 ? { post_sample_cost_usd: w.post_sample_cost_usd } : {},
+      ...typeof w.post_sample_tokens === "number" && Number.isFinite(w.post_sample_tokens) && w.post_sample_tokens > 0 ? { post_sample_tokens: w.post_sample_tokens } : {},
+      ...typeof w.post_sample_requests === "number" && Number.isFinite(w.post_sample_requests) ? { post_sample_requests: w.post_sample_requests } : {},
+      ...typeof w.estimated_remaining_percent === "number" && Number.isFinite(w.estimated_remaining_percent) ? { estimated_remaining_percent: w.estimated_remaining_percent } : {}
+    }));
+    return {
+      id: acct.id,
+      code_name: acct.code_name,
+      tier: acct.tier,
+      status: acct.status,
+      status_label: acct.status_label,
+      ...projectedHistory ? { history: projectedHistory } : {},
+      windows: projectedWindows,
+      has_history: Boolean(acct.has_history)
+    };
+  });
+  const sortedTiers = projectedAccounts.length > 1 ? sortRecordKeys(ag?.summary?.tier_counts) : undefined;
+  const projectedAis = cfg.showAis ? {
+    online: Boolean(ais?.online),
+    status: ais?.status || "unknown",
+    ...ais?.status_message ? { status_message: ais.status_message } : {},
+    next_reset_ms: ais?.next_reset_ms ?? 0,
+    account_counts: {
+      enabled: ais?.account_counts?.enabled ?? 0,
+      ready: ais?.account_counts?.ready ?? 0
+    },
+    playground: {
+      requests: ais?.playground?.requests ?? 0
+    },
+    models: (Array.isArray(ais?.models) ? ais.models : []).map((m) => ({
+      id: m.id,
+      label: m.label,
+      eligible_accounts: m.eligible_accounts,
+      available_accounts: m.available_accounts,
+      cooling_accounts: m.cooling_accounts,
+      limit_requests: m.limit_requests,
+      used_requests: m.used_requests,
+      effective_remaining_requests: m.effective_remaining_requests,
+      limit_tokens: m.limit_tokens,
+      used_tokens: m.used_tokens,
+      effective_remaining_tokens: m.effective_remaining_tokens,
+      effective_percent: m.effective_percent
+    }))
+  } : {
+    online: Boolean(ais?.online),
+    status: ais?.status || "unknown",
+    ...ais?.status_message ? { status_message: ais.status_message } : {},
+    account_counts: {
+      enabled: ais?.account_counts?.enabled ?? 0,
+      ready: ais?.account_counts?.ready ?? 0
+    }
+  };
+  return {
+    generated_at_ms: Number.isFinite(snap.generated_at_ms) ? snap.generated_at_ms : 0,
+    antigravity: {
+      online: Boolean(ag?.online),
+      status: ag?.status || "unknown",
+      ...ag?.status_message ? { status_message: ag.status_message } : {},
+      summary: {
+        active_accounts: ag?.summary?.active_accounts ?? projectedAccounts.length,
+        ...sortedTiers ? { tier_counts: sortedTiers } : {}
+      },
+      accounts: projectedAccounts
+    },
+    aistudio: projectedAis
+  };
+};
+var projectPanelHistory = (hist) => {
+  const series = (Array.isArray(hist.series) ? hist.series : []).map((s) => {
+    const hasCycleResets = Array.isArray(s.cycle_resets) && s.cycle_resets.length > 0;
+    const hasFallbackResets = !hasCycleResets && Array.isArray(s.resets) && s.resets.length >= 2;
+    const hasEstPoint = Array.isArray(s.estimated_point) && s.estimated_point.length >= 2 && typeof s.estimated_point[0] === "number" && Number.isFinite(s.estimated_point[0]) && typeof s.estimated_point[1] === "number" && Number.isFinite(s.estimated_point[1]);
+    return {
+      key: s.key,
+      group: s.group,
+      label: s.label,
+      remaining: s.remaining,
+      points: Array.isArray(s.points) ? s.points : [],
+      ...hasCycleResets ? { cycle_resets: s.cycle_resets } : {},
+      ...hasFallbackResets ? { resets: s.resets } : {},
+      ...hasEstPoint ? { estimated_point: [s.estimated_point[0], s.estimated_point[1]] } : {}
+    };
+  });
+  return {
+    account_id: hist.account_id,
+    window: hist.window,
+    range: hist.range,
+    ...typeof hist.to_sec === "number" && Number.isFinite(hist.to_sec) && hist.to_sec > 0 ? { to_sec: hist.to_sec } : {},
+    series
+  };
+};
+var computeSnapshotRev = (projectedSnap, publicCfg) => shortHash({
+  config: publicCfg,
+  snapshot: {
+    ...projectedSnap,
+    generated_at_ms: 0
+  }
+});
+var computeHistoryRev = (projectedHist) => shortHash({
+  account_id: projectedHist.account_id,
+  window: projectedHist.window,
+  range: projectedHist.range,
+  series: projectedHist.series.map((s) => ({
+    key: s.key,
+    group: s.group,
+    label: s.label,
+    points: s.points,
+    cycle_resets: s.cycle_resets ?? [],
+    resets: s.resets ?? []
+  }))
+});
+var negotiatePanelState = (params) => {
+  const projectedSnap = projectPanelSnapshot(params.snapshot, params.publicConfig);
+  const projectedHist = params.history ? projectPanelHistory(params.history) : null;
+  const currentRev = computeSnapshotRev(projectedSnap, params.publicConfig);
+  const currentHrev = projectedHist ? computeHistoryRev(projectedHist) : "";
+  const clientRev = params.clientRev?.trim() ?? "";
+  const clientHrev = params.clientHrev?.trim() ?? "";
+  const revMatches = Boolean(clientRev) && clientRev === currentRev;
+  const hrevMatches = currentHrev !== "" && Boolean(clientHrev) && clientHrev === currentHrev;
+  const noHistoryUnchanged = currentHrev === "" && !clientHrev;
+  if (revMatches && (hrevMatches || noHistoryUnchanged)) {
+    return {
+      ok: true,
+      unchanged: true,
+      rev: currentRev,
+      ...currentHrev ? { hrev: currentHrev } : {},
+      generatedAtMs: projectedSnap.generated_at_ms,
+      fetchedAtMs: params.fetchedAtMs
+    };
+  }
+  if (hrevMatches) {
+    return {
+      ok: true,
+      rev: currentRev,
+      hrev: currentHrev,
+      historyUnchanged: true,
+      config: params.publicConfig,
+      snapshot: projectedSnap,
+      error: null,
+      errorCode: null,
+      fetchedAtMs: params.fetchedAtMs
+    };
+  }
+  return {
+    ok: true,
+    rev: currentRev,
+    ...currentHrev ? { hrev: currentHrev } : {},
+    config: params.publicConfig,
+    snapshot: projectedSnap,
+    history: projectedHist,
+    error: null,
+    errorCode: null,
+    fetchedAtMs: params.fetchedAtMs
+  };
+};
+var negotiatePanelHistory = (params) => {
+  const projectedHist = projectPanelHistory(params.history);
+  const currentHrev = computeHistoryRev(projectedHist);
+  const clientHrev = params.clientHrev?.trim() ?? "";
+  if (clientHrev && clientHrev === currentHrev) {
+    return {
+      ok: true,
+      unchanged: true,
+      hrev: currentHrev,
+      ...projectedHist.to_sec ? { toSec: projectedHist.to_sec } : {}
+    };
+  }
+  return {
+    ok: true,
+    hrev: currentHrev,
+    ...projectedHist
+  };
 };
 
 // src/shared/format.ts
@@ -1097,13 +1381,7 @@ var buildStatusView = (snapshot, history, cfg) => {
   };
 };
 
-// src/service/main.ts
-var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
-var serviceToken = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
-if (!Number.isFinite(port) || port <= 0 || !serviceToken) {
-  console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
-  process.exit(1);
-}
+// src/service/handler.ts
 var MAX_BODY_BYTES = 64 * 1024;
 var sendJson = (res, status, body) => {
   res.writeHead(status, {
@@ -1161,191 +1439,215 @@ var buildPanelState = async (cfg, options = {}) => {
       history = histRes.data;
     }
   }
-  return {
-    config: toPublicConfig(cfg),
+  return negotiatePanelState({
+    publicConfig: toPublicConfig(cfg),
     snapshot: snapRes.data,
     history,
-    error: null,
-    errorCode: null,
-    fetchedAtMs: snapRes.fetchedAtMs
-  };
+    fetchedAtMs: snapRes.fetchedAtMs,
+    clientRev: options.clientRev,
+    clientHrev: options.clientHrev
+  });
 };
-var handleRequest = async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${serviceToken}`) {
-    sendJson(res, 401, { error: "unauthorized" });
-    return;
-  }
-  const parsedUrl = new URL(req.url ?? "/", "http://127.0.0.1");
-  const pathname = parsedUrl.pathname;
-  const method = (req.method ?? "GET").toUpperCase();
-  if (pathname === "/health" && method === "GET") {
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-  if (pathname === QUOTA_PROVIDER_PATH && method === "POST") {
-    const raw = await readBody(req);
-    const request = readQuotaProviderRequest(raw);
-    if (!request) {
-      sendJson(res, 400, { error: "invalid quota provider request" });
+var createServiceHandler = (options) => {
+  const { serviceToken } = options;
+  const getConfig = options.loadConfigFn ?? (() => loadConfig());
+  const persistConfig = options.saveConfigFn ?? saveConfig;
+  const handleRequest = async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${serviceToken}`) {
+      sendJson(res, 401, { error: "unauthorized" });
       return;
     }
-    const cfg = loadConfig();
-    const snapRes = await fetchBoardSnapshot(cfg);
-    const result = snapRes.ok ? { ok: true, data: buildQuotaUsageData(snapRes.data, cfg) } : { ok: true, data: buildQuotaErrorData(snapRes.message) };
-    sendJson(res, 200, result);
-    return;
-  }
-  if (pathname === "/status" && method === "GET") {
-    const cfg = loadConfig();
-    const snapRes = await fetchBoardSnapshot(cfg);
-    if (!snapRes.ok) {
-      sendJson(res, 200, buildStatusErrorView(cfg, snapRes.message, snapRes.code));
-      return;
-    }
-    let history = null;
-    const firstAccountId = snapRes.data.antigravity?.accounts?.[0]?.id;
-    if (firstAccountId) {
-      const histRes = await fetchAntigravityHistory(cfg, {
-        accountId: firstAccountId,
-        window: "5h",
-        range: "24h"
-      });
-      if (histRes.ok)
-        history = histRes.data;
-    }
-    sendJson(res, 200, buildStatusView(snapRes.data, history, cfg));
-    return;
-  }
-  if (pathname === "/status" && method === "POST") {
-    const body = parseJsonObject(await readBody(req));
-    const actionId = typeof body.id === "string" ? body.id : "";
-    const value = typeof body.value === "string" ? body.value : undefined;
-    if (actionId === "toggle-ais") {
-      const current = loadConfig();
-      const nextShowAis = value !== undefined ? value === "on" || value === "true" : !current.showAis;
-      saveConfig({ showAis: nextShowAis });
-      clearBoardCache();
-      sendJson(res, 200, { ok: true, showAis: nextShowAis });
-      return;
-    }
-    if (actionId === "refresh") {
-      clearBoardCache();
-      const cfg = loadConfig();
-      await fetchBoardSnapshot(cfg, { force: true, fresh: true });
+    const parsedUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+    const pathname = parsedUrl.pathname;
+    const method = (req.method ?? "GET").toUpperCase();
+    if (pathname === "/health" && method === "GET") {
       sendJson(res, 200, { ok: true });
       return;
     }
-    sendJson(res, 400, { message: `未知操作：${actionId || "(empty)"}` });
-    return;
-  }
-  if (pathname === "/panel/state" && method === "GET") {
-    const refresh = parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1";
-    const histWinParam = parsedUrl.searchParams.get("window");
-    const historyWindow = histWinParam === "7d" ? "7d" : "5h";
-    const historyRange = parsedUrl.searchParams.get("range") || (historyWindow === "7d" ? "7d" : "24h");
-    const cfg = loadConfig();
-    const state = await buildPanelState(cfg, { force: refresh, fresh: refresh, historyWindow, historyRange });
-    sendJson(res, 200, state);
-    return;
-  }
-  if (pathname === "/panel/config" && method === "POST") {
-    const body = parseJsonObject(await readBody(req));
-    const patch = {};
-    if (typeof body.url === "string") {
-      patch.url = normalizeBoardUrl(body.url);
-    }
-    if (typeof body.passcode === "string" && body.passcode.length > 0) {
-      patch.passcode = body.passcode;
-    }
-    if (body.clearPasscode === true) {
-      patch.clearPasscode = true;
-    }
-    if (typeof body.showAis === "boolean") {
-      patch.showAis = body.showAis;
-    }
-    if (typeof body.compactQuota === "boolean") {
-      patch.compactQuota = body.compactQuota;
-    }
-    const nextCfg = saveConfig(patch);
-    clearBoardCache();
-    const state = await buildPanelState(nextCfg, { force: true, fresh: false });
-    sendJson(res, 200, state);
-    return;
-  }
-  if (pathname === "/panel/test" && method === "POST") {
-    const body = parseJsonObject(await readBody(req));
-    const current = loadConfig();
-    const testUrl = typeof body.url === "string" && body.url.trim() ? normalizeBoardUrl(body.url) : current.url;
-    const clearPasscode = body.clearPasscode === true;
-    const testPasscode = clearPasscode ? "" : typeof body.passcode === "string" && body.passcode.length > 0 ? body.passcode : current.passcode;
-    const testShowAis = typeof body.showAis === "boolean" ? body.showAis : current.showAis;
-    const testCompactQuota = typeof body.compactQuota === "boolean" ? body.compactQuota : current.compactQuota;
-    const candidate = {
-      url: testUrl,
-      passcode: testPasscode,
-      showAis: testShowAis,
-      compactQuota: testCompactQuota
-    };
-    const snapRes = await fetchBoardSnapshot(candidate, { force: true, fresh: false, timeoutMs: 8000 });
-    if (!snapRes.ok) {
-      sendJson(res, 200, {
-        ok: false,
-        code: snapRes.code,
-        message: snapRes.message
-      });
+    if (pathname === QUOTA_PROVIDER_PATH && method === "POST") {
+      const raw = await readBody(req);
+      const request = readQuotaProviderRequest(raw);
+      if (!request) {
+        sendJson(res, 400, { error: "invalid quota provider request" });
+        return;
+      }
+      const cfg = getConfig();
+      const snapRes = await fetchBoardSnapshot(cfg);
+      const result = snapRes.ok ? { ok: true, data: buildQuotaUsageData(snapRes.data, cfg) } : { ok: true, data: buildQuotaErrorData(snapRes.message) };
+      sendJson(res, 200, result);
       return;
     }
-    if (body.save === true) {
-      saveConfig({
-        url: candidate.url,
-        passcode: candidate.passcode,
-        clearPasscode,
-        showAis: candidate.showAis,
-        compactQuota: candidate.compactQuota
+    if (pathname === "/status" && method === "GET") {
+      const cfg = getConfig();
+      const snapRes = await fetchBoardSnapshot(cfg);
+      if (!snapRes.ok) {
+        sendJson(res, 200, buildStatusErrorView(cfg, snapRes.message, snapRes.code));
+        return;
+      }
+      let history = null;
+      const firstAccountId = snapRes.data.antigravity?.accounts?.[0]?.id;
+      if (firstAccountId) {
+        const histRes = await fetchAntigravityHistory(cfg, {
+          accountId: firstAccountId,
+          window: "5h",
+          range: "24h"
+        });
+        if (histRes.ok)
+          history = histRes.data;
+      }
+      sendJson(res, 200, buildStatusView(snapRes.data, history, cfg));
+      return;
+    }
+    if (pathname === "/status" && method === "POST") {
+      const body = parseJsonObject(await readBody(req));
+      const actionId = typeof body.id === "string" ? body.id : "";
+      const value = typeof body.value === "string" ? body.value : undefined;
+      if (actionId === "toggle-ais") {
+        const current = getConfig();
+        const nextShowAis = value !== undefined ? value === "on" || value === "true" : !current.showAis;
+        persistConfig({ showAis: nextShowAis });
+        clearBoardCache();
+        sendJson(res, 200, { ok: true, showAis: nextShowAis });
+        return;
+      }
+      if (actionId === "refresh") {
+        clearBoardCache();
+        const cfg = getConfig();
+        await fetchBoardSnapshot(cfg, { force: true, fresh: true });
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      sendJson(res, 400, { message: `未知操作：${actionId || "(empty)"}` });
+      return;
+    }
+    if (pathname === "/panel/state" && method === "GET") {
+      const refresh = parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1";
+      const histWinParam = parsedUrl.searchParams.get("window");
+      const historyWindow = histWinParam === "7d" ? "7d" : "5h";
+      const historyRange = parsedUrl.searchParams.get("range") || (historyWindow === "7d" ? "7d" : "24h");
+      const clientRev = parsedUrl.searchParams.get("rev");
+      const clientHrev = parsedUrl.searchParams.get("hrev");
+      const cfg = getConfig();
+      const state = await buildPanelState(cfg, {
+        force: refresh,
+        fresh: refresh,
+        historyWindow,
+        historyRange,
+        clientRev,
+        clientHrev
       });
+      sendJson(res, 200, state);
+      return;
+    }
+    if (pathname === "/panel/config" && method === "POST") {
+      const body = parseJsonObject(await readBody(req));
+      const patch = {};
+      if (typeof body.url === "string") {
+        patch.url = normalizeBoardUrl(body.url);
+      }
+      if (typeof body.passcode === "string" && body.passcode.length > 0) {
+        patch.passcode = body.passcode;
+      }
+      if (body.clearPasscode === true) {
+        patch.clearPasscode = true;
+      }
+      if (typeof body.showAis === "boolean") {
+        patch.showAis = body.showAis;
+      }
+      if (typeof body.compactQuota === "boolean") {
+        patch.compactQuota = body.compactQuota;
+      }
+      const nextCfg = persistConfig(patch);
       clearBoardCache();
-    }
-    const agAccounts = snapRes.data.antigravity?.summary?.active_accounts ?? snapRes.data.antigravity?.accounts?.length ?? 0;
-    const aisReady = snapRes.data.aistudio?.account_counts?.ready ?? 0;
-    const aisEnabled = snapRes.data.aistudio?.account_counts?.enabled ?? 0;
-    sendJson(res, 200, {
-      ok: true,
-      saved: body.save === true,
-      summary: `连接成功：AG ${agAccounts} 号 · AIS ${aisReady}/${aisEnabled} 号就绪`,
-      config: toPublicConfig(candidate)
-    });
-    return;
-  }
-  if (pathname === "/panel/history" && method === "GET") {
-    const cfg = loadConfig();
-    const accountId = parsedUrl.searchParams.get("account") ?? "";
-    if (!accountId) {
-      sendJson(res, 400, { error: "missing account parameter" });
+      const state = await buildPanelState(nextCfg, { force: true, fresh: false });
+      sendJson(res, 200, state);
       return;
     }
-    const windowKind = parsedUrl.searchParams.get("window") === "7d" ? "7d" : "5h";
-    const range = parsedUrl.searchParams.get("range") || (windowKind === "7d" ? "7d" : "24h");
-    const histRes = await fetchAntigravityHistory(cfg, {
-      accountId,
-      window: windowKind,
-      range,
-      force: parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1"
-    });
-    if (!histRes.ok) {
-      sendJson(res, 502, { error: histRes.message });
+    if (pathname === "/panel/test" && method === "POST") {
+      const body = parseJsonObject(await readBody(req));
+      const current = getConfig();
+      const testUrl = typeof body.url === "string" && body.url.trim() ? normalizeBoardUrl(body.url) : current.url;
+      const clearPasscode = body.clearPasscode === true;
+      const testPasscode = clearPasscode ? "" : typeof body.passcode === "string" && body.passcode.length > 0 ? body.passcode : current.passcode;
+      const testShowAis = typeof body.showAis === "boolean" ? body.showAis : current.showAis;
+      const testCompactQuota = typeof body.compactQuota === "boolean" ? body.compactQuota : current.compactQuota;
+      const candidate = {
+        url: testUrl,
+        passcode: testPasscode,
+        showAis: testShowAis,
+        compactQuota: testCompactQuota
+      };
+      const snapRes = await fetchBoardSnapshot(candidate, { force: true, fresh: false, timeoutMs: 8000 });
+      if (!snapRes.ok) {
+        sendJson(res, 200, {
+          ok: false,
+          code: snapRes.code,
+          message: snapRes.message
+        });
+        return;
+      }
+      if (body.save === true) {
+        persistConfig({
+          url: candidate.url,
+          passcode: candidate.passcode,
+          clearPasscode,
+          showAis: candidate.showAis,
+          compactQuota: candidate.compactQuota
+        });
+        clearBoardCache();
+      }
+      const agAccounts = snapRes.data.antigravity?.summary?.active_accounts ?? snapRes.data.antigravity?.accounts?.length ?? 0;
+      const aisReady = snapRes.data.aistudio?.account_counts?.ready ?? 0;
+      const aisEnabled = snapRes.data.aistudio?.account_counts?.enabled ?? 0;
+      sendJson(res, 200, {
+        ok: true,
+        saved: body.save === true,
+        summary: `连接成功：AG ${agAccounts} 号 · AIS ${aisReady}/${aisEnabled} 号就绪`,
+        config: toPublicConfig(candidate)
+      });
       return;
     }
-    sendJson(res, 200, histRes.data);
-    return;
-  }
-  sendJson(res, 404, { error: "not-found" });
+    if (pathname === "/panel/history" && method === "GET") {
+      const cfg = getConfig();
+      const accountId = parsedUrl.searchParams.get("account") ?? "";
+      if (!accountId) {
+        sendJson(res, 400, { error: "missing account parameter" });
+        return;
+      }
+      const windowKind = parsedUrl.searchParams.get("window") === "7d" ? "7d" : "5h";
+      const range = parsedUrl.searchParams.get("range") || (windowKind === "7d" ? "7d" : "24h");
+      const clientHrev = parsedUrl.searchParams.get("hrev");
+      const histRes = await fetchAntigravityHistory(cfg, {
+        accountId,
+        window: windowKind,
+        range,
+        force: parsedUrl.searchParams.get("refresh") === "1" || parsedUrl.searchParams.get("force") === "1"
+      });
+      if (!histRes.ok) {
+        sendJson(res, 502, { error: histRes.message });
+        return;
+      }
+      sendJson(res, 200, negotiatePanelHistory({ history: histRes.data, clientHrev }));
+      return;
+    }
+    sendJson(res, 404, { error: "not-found" });
+  };
+  return (req, res) => {
+    handleRequest(req, res).catch((err) => {
+      const message = err instanceof Error ? err.message : "internal error";
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: message });
+      }
+    });
+  };
 };
-var server = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    const message = err instanceof Error ? err.message : "internal error";
-    if (!res.headersSent) {
-      sendJson(res, 500, { error: message });
-    }
-  });
-});
+
+// src/service/main.ts
+var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
+var serviceToken = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
+if (!Number.isFinite(port) || port <= 0 || !serviceToken) {
+  console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
+  process.exit(1);
+}
+var server = http.createServer(createServiceHandler({ serviceToken }));
 server.listen(port, "127.0.0.1");

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type {
   AntigravityHistoryResponse,
   BoardSnapshot,
@@ -15,24 +16,47 @@ const HISTORY_TTL_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const FRESH_REQUEST_TIMEOUT_MS = 12_000;
 
-let snapshotCache: { key: string; fetchedAtMs: number; data: BoardSnapshot } | null = null;
-const historyCache = new Map<string, { fetchedAtMs: number; data: AntigravityHistoryResponse }>();
+interface CachedEntry<T> {
+  key: string;
+  fetchedAtMs: number;
+  data: T;
+  etag?: string;
+}
+
+let snapshotCache: CachedEntry<BoardSnapshot> | null = null;
+const historyCache = new Map<string, { fetchedAtMs: number; data: AntigravityHistoryResponse; etag?: string }>();
 
 export const clearBoardCache = (): void => {
   snapshotCache = null;
   historyCache.clear();
 };
 
-const cacheKeyOf = (cfg: PoolQuotaConfig): string => `${cfg.url}|${cfg.passcode.length > 0 ? 'auth' : 'open'}`;
+const passcodeFingerprint = (passcode: string): string => (
+  passcode.length > 0
+    ? crypto.createHash('sha256').update(passcode).digest('hex').slice(0, 8)
+    : 'open'
+);
 
-const buildHeaders = (cfg: PoolQuotaConfig): Record<string, string> => {
+const cacheKeyOf = (cfg: PoolQuotaConfig): string => `${cfg.url}|${passcodeFingerprint(cfg.passcode)}`;
+
+const buildHeaders = (cfg: PoolQuotaConfig, etag?: string): Record<string, string> => {
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
   if (cfg.passcode) {
     headers['X-View-Passcode'] = cfg.passcode;
   }
+  if (etag) {
+    headers['If-None-Match'] = etag;
+  }
   return headers;
+};
+
+const parsePositiveHeaderInt = (res: Response, headerName: string): number | null => {
+  const raw = res.headers.get(headerName);
+  if (raw === null) return null;
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 };
 
 export const fetchBoardSnapshot = async (
@@ -43,17 +67,21 @@ export const fetchBoardSnapshot = async (
   const key = cacheKeyOf(cfg);
   const bypassCache = Boolean(options.force || options.fresh);
   const useFresh = options.fresh ?? Boolean(options.force);
-  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < SNAPSHOT_TTL_MS) {
-    return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
+  const cached = snapshotCache && snapshotCache.key === key ? snapshotCache : null;
+
+  if (!bypassCache && cached && now - cached.fetchedAtMs < SNAPSHOT_TTL_MS) {
+    return { ok: true, data: cached.data, fetchedAtMs: cached.fetchedAtMs };
   }
 
-  const snapshotUrl = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
+  const snapshotUrl = useFresh
+    ? `${cfg.url}/api/snapshot?view=compact&fresh=1`
+    : `${cfg.url}/api/snapshot?view=compact`;
 
   let response: Response;
   try {
     response = await fetch(snapshotUrl, {
       method: 'GET',
-      headers: buildHeaders(cfg),
+      headers: buildHeaders(cfg, cached?.etag),
       signal: AbortSignal.timeout(options.timeoutMs ?? (useFresh ? FRESH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS)),
     });
   } catch (err) {
@@ -67,6 +95,9 @@ export const fetchBoardSnapshot = async (
   }
 
   if (response.status === 401 || response.status === 403) {
+    if (snapshotCache?.key === key) {
+      snapshotCache = null;
+    }
     return {
       ok: false,
       code: 'unauthorized',
@@ -76,6 +107,18 @@ export const fetchBoardSnapshot = async (
         : '看板已开启口令保护，请打开左侧 Pool Quota 面板填写访问口令。',
       fetchedAtMs: Date.now(),
     };
+  }
+
+  if (response.status === 304 && cached) {
+    const cloned = structuredClone(cached.data);
+    const headerGenMs = parsePositiveHeaderInt(response, 'X-Generated-At-Ms');
+    if (headerGenMs !== null) {
+      cloned.generated_at_ms = headerGenMs;
+    }
+    const nextEtag = response.headers.get('ETag')?.trim() || cached.etag;
+    const fetchedAtMs = Date.now();
+    snapshotCache = { key, fetchedAtMs, data: cloned, etag: nextEtag };
+    return { ok: true, data: cloned, fetchedAtMs };
   }
 
   if (!response.ok) {
@@ -116,7 +159,8 @@ export const fetchBoardSnapshot = async (
 
   const data = parsed as BoardSnapshot;
   const fetchedAtMs = Date.now();
-  snapshotCache = { key, fetchedAtMs, data };
+  const etag = response.headers.get('ETag')?.trim() || undefined;
+  snapshotCache = { key, fetchedAtMs, data, etag };
   return { ok: true, data, fetchedAtMs };
 };
 
@@ -143,7 +187,7 @@ export const fetchAntigravityHistory = async (
   try {
     response = await fetch(`${cfg.url}/api/antigravity/history?${query.toString()}`, {
       method: 'GET',
-      headers: buildHeaders(cfg),
+      headers: buildHeaders(cfg, cached?.etag),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
@@ -157,6 +201,7 @@ export const fetchAntigravityHistory = async (
   }
 
   if (response.status === 401 || response.status === 403) {
+    historyCache.delete(key);
     return {
       ok: false,
       code: 'unauthorized',
@@ -164,6 +209,18 @@ export const fetchAntigravityHistory = async (
       message: '历史曲线接口需要有效访问口令。',
       fetchedAtMs: Date.now(),
     };
+  }
+
+  if (response.status === 304 && cached) {
+    const cloned = structuredClone(cached.data);
+    const headerToSec = parsePositiveHeaderInt(response, 'X-History-To-Sec');
+    if (headerToSec !== null) {
+      cloned.to_sec = headerToSec;
+    }
+    const nextEtag = response.headers.get('ETag')?.trim() || cached.etag;
+    const fetchedAtMs = Date.now();
+    historyCache.set(key, { fetchedAtMs, data: cloned, etag: nextEtag });
+    return { ok: true, data: cloned, fetchedAtMs };
   }
 
   if (!response.ok) {
@@ -179,7 +236,8 @@ export const fetchAntigravityHistory = async (
   try {
     const data = (await response.json()) as AntigravityHistoryResponse;
     const fetchedAtMs = Date.now();
-    historyCache.set(key, { fetchedAtMs, data });
+    const etag = response.headers.get('ETag')?.trim() || undefined;
+    historyCache.set(key, { fetchedAtMs, data, etag });
     return { ok: true, data, fetchedAtMs };
   } catch {
     return {

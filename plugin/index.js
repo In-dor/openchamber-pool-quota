@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -135,17 +136,33 @@ function fmtCountdown(resetAtMs) {
   return `${Math.max(1, mins)}m`;
 }
 
+function passcodeFingerprint(passcode) {
+  return passcode && passcode.length > 0
+    ? crypto.createHash("sha256").update(passcode).digest("hex").slice(0, 8)
+    : "open";
+}
+
+function parsePositiveHeaderInt(res, headerName) {
+  const raw = res.headers.get(headerName);
+  if (raw === null) return null;
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+}
+
 async function fetchSnapshot(cfg, options = {}) {
   const now = Date.now();
-  const key = `${cfg.url}|${cfg.passcode.length > 0 ? "auth" : "open"}`;
+  const key = `${cfg.url}|${passcodeFingerprint(cfg.passcode)}`;
   const bypassCache = Boolean(options.force || options.fresh);
   const useFresh = options.fresh ?? Boolean(options.force);
-  if (!bypassCache && snapshotCache && snapshotCache.key === key && now - snapshotCache.fetchedAtMs < CACHE_TTL_MS) {
-    return { ok: true, data: snapshotCache.data, fetchedAtMs: snapshotCache.fetchedAtMs };
+  const cached = snapshotCache && snapshotCache.key === key ? snapshotCache : null;
+
+  if (!bypassCache && cached && now - cached.fetchedAtMs < CACHE_TTL_MS) {
+    return { ok: true, data: cached.data, fetchedAtMs: cached.fetchedAtMs };
   }
 
   const headers = { Accept: "application/json" };
   if (cfg.passcode) headers["X-View-Passcode"] = cfg.passcode;
+  if (cached?.etag) headers["If-None-Match"] = cached.etag;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? (useFresh ? 10_000 : 6_000));
@@ -157,7 +174,9 @@ async function fetchSnapshot(cfg, options = {}) {
     options.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const url = useFresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
+  const url = useFresh
+    ? `${cfg.url}/api/snapshot?view=compact&fresh=1`
+    : `${cfg.url}/api/snapshot?view=compact`;
   let res;
   try {
     res = await fetch(url, { method: "GET", headers, signal: controller.signal });
@@ -172,12 +191,26 @@ async function fetchSnapshot(cfg, options = {}) {
   }
 
   if (res.status === 401 || res.status === 403) {
+    if (snapshotCache?.key === key) snapshotCache = null;
     return {
       ok: false,
       code: "unauthorized",
       error: "看板口令未配置或不正确，请在 OpenChamber 左侧 Pool Quota 面板或 OpenCode TUI /quota（按 s）中配置。",
     };
   }
+
+  if (res.status === 304 && cached) {
+    const cloned = structuredClone(cached.data);
+    const headerGenMs = parsePositiveHeaderInt(res, "X-Generated-At-Ms");
+    if (headerGenMs !== null) {
+      cloned.generated_at_ms = headerGenMs;
+    }
+    const nextEtag = res.headers.get("ETag")?.trim() || cached.etag;
+    const fetchedAtMs = Date.now();
+    snapshotCache = { key, fetchedAtMs, data: cloned, etag: nextEtag };
+    return { ok: true, data: cloned, fetchedAtMs };
+  }
+
   if (!res.ok) {
     return { ok: false, code: "http", error: `看板返回 HTTP ${res.status}` };
   }
@@ -189,8 +222,10 @@ async function fetchSnapshot(cfg, options = {}) {
     return { ok: false, code: "invalid", error: "看板响应不是合法 JSON" };
   }
 
-  snapshotCache = { key, fetchedAtMs: Date.now(), data };
-  return { ok: true, data, fetchedAtMs: snapshotCache.fetchedAtMs };
+  const etag = res.headers.get("ETag")?.trim() || undefined;
+  const fetchedAtMs = Date.now();
+  snapshotCache = { key, fetchedAtMs, data, etag };
+  return { ok: true, data, fetchedAtMs };
 }
 
 function summarizeSnapshot(snap, cfg, options = {}) {

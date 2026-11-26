@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/solid */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -264,14 +265,43 @@ function shortFooterModelName(id: string): string {
   return id.replace(/^gemini-4-/, "").replace(/^gemini-/, "g");
 }
 
-async function fetchBoardSnapshot(
+let lastCacheKey = "";
+let lastEtag: string | null = null;
+let lastSnapshot: Snapshot | null = null;
+
+function passcodeFingerprint(passcode: string): string {
+  return passcode && passcode.length > 0
+    ? crypto.createHash("sha256").update(passcode).digest("hex").slice(0, 8)
+    : "open";
+}
+
+function parsePositiveHeaderInt(res: Response, headerName: string): number | null {
+  const raw = res.headers.get(headerName);
+  if (raw === null) return null;
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+}
+
+export function clearSnapshotCache(): void {
+  lastCacheKey = "";
+  lastEtag = null;
+  lastSnapshot = null;
+}
+
+export async function fetchBoardSnapshot(
   cfg: PoolConfig,
   options: { fresh?: boolean; timeoutMs?: number } = {},
 ): Promise<{ ok: true; data: Snapshot } | { ok: false; code: string; error: string }> {
+  const cacheKey = `${cfg.url}|${passcodeFingerprint(cfg.passcode)}`;
+  const canReuseCached = cacheKey === lastCacheKey && lastSnapshot !== null;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (cfg.passcode) headers["X-View-Passcode"] = cfg.passcode;
+  if (canReuseCached && lastEtag) headers["If-None-Match"] = lastEtag;
+
   const timeoutMs = options.timeoutMs ?? (options.fresh ? 10_000 : 7_000);
-  const url = options.fresh ? `${cfg.url}/api/snapshot?fresh=1` : `${cfg.url}/api/snapshot`;
+  const url = options.fresh
+    ? `${cfg.url}/api/snapshot?view=tui&fresh=1`
+    : `${cfg.url}/api/snapshot?view=tui`;
 
   let res: Response;
   try {
@@ -289,14 +319,33 @@ async function fetchBoardSnapshot(
   }
 
   if (res.status === 401 || res.status === 403) {
+    if (cacheKey === lastCacheKey) {
+      lastEtag = null;
+      lastSnapshot = null;
+    }
     return { ok: false, code: "unauthorized", error: "需要访问口令（在 /quota 弹窗按 s 配置）" };
   }
+
+  if (res.status === 304 && canReuseCached && lastSnapshot) {
+    const cloned = structuredClone(lastSnapshot);
+    const headerGenMs = parsePositiveHeaderInt(res, "X-Generated-At-Ms");
+    if (headerGenMs !== null) {
+      cloned.generated_at_ms = headerGenMs;
+    }
+    lastEtag = res.headers.get("ETag")?.trim() || lastEtag;
+    lastSnapshot = cloned;
+    return { ok: true, data: cloned };
+  }
+
   if (!res.ok) {
     return { ok: false, code: "http", error: `HTTP ${res.status}` };
   }
 
   try {
     const data = (await res.json()) as Snapshot;
+    lastCacheKey = cacheKey;
+    lastEtag = res.headers.get("ETag")?.trim() || null;
+    lastSnapshot = data;
     return { ok: true, data };
   } catch {
     return { ok: false, code: "invalid", error: "看板返回非法 JSON" };
